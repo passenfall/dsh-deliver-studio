@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>Deliver Studio UI harness</title>
+<!-- 由 test/ui-harness-server.mjs 提供：用真实 React 19 渲染工作台组件。?f=<文件名>&w=<面板宽> -->
+<style>
+:root{--dsw-alias-bg-base:#ffffff;--dsw-alias-bg-layer-1:#fafaf9;--dsw-alias-bg-layer-2:#f2f1ef;--dsw-alias-bg-overlay:#ffffff;--dsw-alias-border-l1:#e7e5e2;--dsw-alias-border-l2:#d3d0cb;--dsw-alias-brand-primary:#4d6bfe;--dsw-alias-label-primary:#1f1e1c;--dsw-alias-label-secondary:#6f6c66;--dsw-alias-state-error-primary:#e5484d;--dsw-alias-state-idle-primary:#a8a29e;--dsw-alias-state-success-primary:#30a46c;--dsw-alias-state-warn-primary:#f5a524}
+html,body{margin:0;height:100%;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:#ecebe8}
+#host{position:absolute;right:0;top:0;bottom:0;border-left:1px solid #d3d0cb;background:#fff}
+</style>
+<div id="host"></div>
+<script>
+window.process = { env: { NODE_ENV: 'development' } }
+;(async () => {
+  const q = new URLSearchParams(location.search)
+  const info = await (await fetch('/info')).json()
+  const name = q.get('f') || info.name
+  document.getElementById('host').style.width = (q.get('w') || 760) + 'px'
+  const mods = {}
+  const load = async (name, url) => { const src = await (await fetch(url)).text(); const module = { exports: {} }; new Function('module', 'exports', 'require', 'process', src)(module, module.exports, (n) => mods[n], window.process); mods[name] = module.exports }
+  await load('react', '/vendor/react'); await load('scheduler', '/vendor/scheduler'); await load('react-dom', '/vendor/react-dom'); await load('react-dom/client', '/vendor/react-dom-client')
+  window.__ModuleLoader__ = { load(m) { window.__mod = m.factory((n) => mods[n]) } }
+  await new Promise((r) => { const s = document.createElement('script'); s.src = '/client.js'; s.onload = r; document.head.appendChild(s) })
+  const regs = {}
+  const ctx = {
+    effect(fn) { return fn() }, get(n) { return ctx[n] }, inject() {},
+    locale: { register() { return () => {} }, bind() { return (k) => k } },
+    documentPreviews: { register() { return () => {} } },
+    slots: { inject(n, cb) { return cb() }, register(o, c) { regs[o.name] = c; return () => {} } },
+    sessions: { scope() { return undefined } },
+    sidebarRight: { openResource(a) { (window.__opened = window.__opened || []).push(a) } },
+  }
+  window.__mod.apply(ctx)
+  const Workbench = regs['sidebar.right.tab.document']
+  const data = new Uint8Array(await (await fetch('/work/' + encodeURIComponent(name))).arrayBuffer())
+  const readRelated = async (address, rel) => {
+    const r = await fetch('/work/' + rel.split('/').map(encodeURIComponent).join('/'))
+    return r.ok ? { ok: true, value: { data: new Uint8Array(await r.arrayBuffer()) } } : { ok: false, error: { message: 'HTTP ' + r.status, details: {} } }
+  }
+  const h = mods.react.createElement
+  window.__render = () => mods['react-dom/client'].createRoot(document.getElementById('host')).render(h(Workbench, {
+    content: { kind: 'bytes', data }, resourceAddress: 'dsh-resource://file/session/s1/' + encodeURIComponent(name), readRelated, sessionId: 's1',
+    inputActions: { setDraft(t) { window.__draft = t } },
+  }))
+  window.__render()
+  window.__harnessReady = true
+})().catch((e) => { document.body.textContent = 'harness error: ' + (e && e.stack || e) })
+</script>

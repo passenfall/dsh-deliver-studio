@@ -15,6 +15,30 @@ import { randomBytes } from 'node:crypto'
 
 const here = dirname(fileURLToPath(import.meta.url))
 export const RUNTIME_SOURCE = readFileSync(join(here, 'runtime.js'), 'utf8')
+export const VIEWER_SOURCE = readFileSync(join(here, 'viewer.js'), 'utf8')
+
+/** 带批注 HTML 的嵌入块（工作台导出、viewer「保存副本」两边格式一致） */
+export const ANNOT_START = '<!--deliver-studio:annotations:start-->'
+export const ANNOT_END = '<!--deliver-studio:annotations:end-->'
+const ANNOT_RE = /<!--deliver-studio:annotations:start-->[\s\S]*?<!--deliver-studio:annotations:end-->/gu
+
+/** 去掉嵌入的批注块，得到原始页面 */
+export function stripAnnotations(src) { return String(src).replace(ANNOT_RE, '') }
+
+/** 读取嵌入的批注数据；没有时返回 undefined */
+export function readAnnotations(src) {
+  const m = /<script type="application\/json" id="deliver-studio-data">([\s\S]*?)<\/script>/u.exec(String(src))
+  if (!m) return undefined
+  try { return JSON.parse(m[1]) } catch { return undefined }
+}
+
+/** 生成嵌入块：数据（含 gzip 压缩的原始页面，供 viewer 保存副本）+ viewer 脚本 */
+export function annotationBlock(data) {
+  if (/<\/script/iu.test(VIEWER_SOURCE)) throw new Error('viewer.js must not contain </script')
+  if (VIEWER_SOURCE.includes(ANNOT_START) || VIEWER_SOURCE.includes(ANNOT_END)) throw new Error('viewer.js must not contain the annotation markers')
+  const json = JSON.stringify(data).replace(/</gu, '\\u003c')
+  return `${ANNOT_START}\n<script type="application/json" id="deliver-studio-data">${json}</script>\n<script id="deliver-studio-viewer">${VIEWER_SOURCE}</script>\n${ANNOT_END}`
+}
 
 export const BROWSER_MISSING = '未找到 Chromium 内核浏览器（Edge / Chrome / Chromium / Brave）。请安装其中一个，或在插件设置里填写浏览器路径。'
 
@@ -166,14 +190,14 @@ function runBrowser(exe, args, { timeoutMs = 60_000, signal } = {}) {
   })
 }
 
-function inject(html, { head = '', bodyEnd = '' }) {
+export function inject(html, { head = '', bodyEnd = '' }) {
   let s = html
   if (head) {
     if (/<head[^>]*>/iu.test(s)) s = s.replace(/<head[^>]*>/iu, (m) => m + head)
     else if (/<html[^>]*>/iu.test(s)) s = s.replace(/<html[^>]*>/iu, (m) => m + '<head>' + head + '</head>')
     else s = head + s
   }
-  if (bodyEnd) {
+  if (bodyEnd !== undefined && bodyEnd !== '') {
     const idx = s.search(/<\/body\s*>(?![\s\S]*<\/body\s*>)/iu)
     s = idx >= 0 ? s.slice(0, idx) + bodyEnd + s.slice(idx) : s + bodyEnd
   }
@@ -184,7 +208,8 @@ async function withTemp(htmlPath, transform, fn) {
   const src = await readFile(htmlPath, 'utf8')
   const tmp = join(dirname(htmlPath), `.deliver-studio-${randomBytes(4).toString('hex')}${extname(htmlPath) || '.html'}`)
   const profile = await mkdtemp(join(tmpdir(), 'deliver-studio-browser-'))
-  await writeFile(tmp, transform(src), 'utf8')
+  // 带批注的 HTML：QA / 导出 PDF 只看原始页面，不带批注查看器
+  await writeFile(tmp, transform(stripAnnotations(src)), 'utf8')
   try {
     return await fn(tmp, profile)
   } finally {

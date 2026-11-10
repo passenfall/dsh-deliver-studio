@@ -8,8 +8,11 @@
 import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, statSync } from 'node:fs'
-import { resolve, isAbsolute, extname, basename } from 'node:path'
-import { qaFile, exportPdf, findBrowser, pickBrowserPath } from './browser.js'
+import { readFile, writeFile } from 'node:fs/promises'
+import { resolve, isAbsolute, extname, basename, dirname, join } from 'node:path'
+import { gzipSync } from 'node:zlib'
+import { randomBytes } from 'node:crypto'
+import { qaFile, exportPdf, findBrowser, pickBrowserPath, stripAnnotations, readAnnotations, annotationBlock, inject as injectHtml } from './browser.js'
 
 export const name = 'dsh-deliver-studio'
 export const inject = ['tools', 'agents']
@@ -31,6 +34,26 @@ export const Config = Schema.object({
 })
 
 const unref = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' ? v.get() : v)
+
+// ── 批注数据清洗（只保留导出 HTML 需要的字段） ─────────────
+const cleanStr = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '')
+const cleanNum = (v) => (Number.isFinite(v) ? v : 0)
+const cleanAuthor = (a) => ({ id: cleanStr(a?.id, 64), name: cleanStr(a?.name, 40) })
+const cleanColor = (c) => (/^#[0-9a-f]{6}$/iu.test(c ?? '') ? c : '#e5484d')
+export function cleanNotes(notes) {
+  if (!Array.isArray(notes)) return []
+  return notes.slice(0, 500).filter((n) => n && typeof n.id === 'string').map((n) => ({
+    id: cleanStr(n.id, 64), name: cleanStr(n.name, 40), color: cleanColor(n.color), comment: cleanStr(n.comment, 4000),
+    author: cleanAuthor(n.author), time: cleanNum(n.time), updated: cleanNum(n.updated),
+    targets: (Array.isArray(n.targets) ? n.targets : []).slice(0, 20).map((t) => ({ selector: cleanStr(t?.selector, 1000), tag: cleanStr(t?.tag, 40), text: cleanStr(t?.text, 200), route: cleanStr(t?.route, 400) })),
+    replies: (Array.isArray(n.replies) ? n.replies : []).slice(0, 200).map((r) => ({ id: cleanStr(r?.id, 64), author: cleanAuthor(r?.author), time: cleanNum(r?.time), text: cleanStr(r?.text, 4000) })),
+  }))
+}
+function cleanPeople(p) {
+  const out = {}
+  if (p && typeof p === 'object') for (const [k, v] of Object.entries(p).slice(0, 200)) if (typeof v === 'string') out[k.slice(0, 64)] = v.slice(0, 40)
+  return out
+}
 
 export function apply(ctx, config = {}) {
   const cfg = () => ({
@@ -74,6 +97,29 @@ export function apply(ctx, config = {}) {
     }
     const pdf = await exportPdf(path, { out, browserPath: c.browserPath || undefined, signal })
     return { ok: true, path, ...pdf, qa }
+  }
+
+  /** Host 方法：导出带批注的 HTML（同目录 <原名>.annotated.html；源文件已带批注时写回它自己） */
+  async function runAnnotated(path, { notes, people, docId, title } = {}) {
+    const raw = await readFile(path, 'utf8')
+    const prev = readAnnotations(raw)
+    const src = stripAnnotations(raw)
+    const ext = extname(path) || '.html'
+    const base = basename(path, ext).replace(/\.annotated$/iu, '')
+    const out = join(dirname(path), `${base}.annotated${ext}`)
+    const now = Date.now()
+    const data = {
+      format: 'deliver-studio-annotations', version: 1,
+      docId: cleanStr(docId, 64) || prev?.docId || 'd' + randomBytes(6).toString('hex'),
+      file: base + ext, title: cleanStr(title, 200),
+      exportedAt: now, savedAt: now,
+      people: cleanPeople(people),
+      notes: cleanNotes(notes),
+      source: gzipSync(Buffer.from(src, 'utf8')).toString('base64'),
+    }
+    const html = injectHtml(src, { bodyEnd: annotationBlock(data) })
+    await writeFile(out, html, 'utf8')
+    return { ok: true, path: out, notes: data.notes.length, bytes: Buffer.byteLength(html), docId: data.docId }
   }
 
   function renderQa(r, max = 40) {
@@ -165,10 +211,10 @@ export function apply(ctx, config = {}) {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       res.end(JSON.stringify(body))
     }
-    const readJson = async (req) => {
+    const readJson = async (req, limit = 256 * 1024) => {
       const chunks = []
       let size = 0
-      for await (const chunk of req) { size += chunk.length; if (size > 256 * 1024) return undefined; chunks.push(chunk) }
+      for await (const chunk of req) { size += chunk.length; if (size > limit) return undefined; chunks.push(chunk) }
       try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch { return undefined }
     }
     const guard = (req, res) => {
@@ -205,6 +251,17 @@ export function apply(ctx, config = {}) {
           try {
             const r = await runExport(resolveHtml(agentOf(body?.sessionId), body?.path), { force: body?.force === true })
             writeJson(res, 200, { ...r, ok: r.ok === true })
+          } catch (error) { writeJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }) }
+        },
+      },
+      {
+        kind: 'exact', path: `${BRIDGE}/annotated`, handler: async (req, res) => {
+          if (!guard(req, res)) return
+          const body = await readJson(req, 4 * 1024 * 1024)
+          if (!body) { writeJson(res, 413, { ok: false, error: '批注数据过大或格式错误' }); return }
+          try {
+            const r = await runAnnotated(resolveHtml(agentOf(body.sessionId), body.path), { notes: body.notes, people: body.people, docId: body.docId, title: body.title })
+            writeJson(res, 200, r)
           } catch (error) { writeJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }) }
         },
       },

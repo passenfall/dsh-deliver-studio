@@ -1,10 +1,13 @@
 {
   "name": "dsh-deliver-studio",
-  "version": "0.1.0",
-  "description": "交付工作台：HTML 交付物的视口预览、选择·Ask AI 批注、交付 QA（编号、孤字、溢出、留白、对比度、字数、禁用字样）与本机 Chromium 内核浏览器（Edge / Chrome 等）导出 PDF。",
-  "author": "passenfall",
+  "version": "0.2.0",
+  "description": "交付工作台：HTML 交付物的视口预览、就地批注（可导出带批注的 HTML，供他人回答）、分类交付 QA（编号、孤字、溢出、留白、对比度、字数、禁用字样）与本机 Chromium 内核浏览器（Edge / Chrome 等）导出 PDF。",
+  "author": "passenfall (https://github.com/passenfall)",
   "license": "MIT",
-  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "html", "pdf", "qa"],
+  "homepage": "https://github.com/passenfall/dsh-deliver-studio#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/passenfall/dsh-deliver-studio.git" },
+  "bugs": { "url": "https://github.com/passenfall/dsh-deliver-studio/issues" },
+  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "html", "pdf", "qa", "annotation", "review"],
   "private": true,
   "type": "module",
   "main": "index.js",
@@ -15,10 +18,11 @@
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
-  "files": ["index.js", "browser.js", "runtime.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "files": ["index.js", "browser.js", "runtime.js", "viewer.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "CHANGELOG.md", "LICENSE"],
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/browser-find.mjs && node --import ./test/register.mjs test/host-sim.mjs"
+    "test": "node test/browser-find.mjs && node --import ./test/register.mjs test/host-sim.mjs",
+    "test:e2e": "node test/viewer-e2e.mjs && node --import ./test/register.mjs test/ui-e2e.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "*",

@@ -131,6 +131,30 @@ try {
   assert.deepEqual(lastPatch.patch, { edgePath: '' })
   console.log('bridge /update → 白名单过滤正确')
 
+  // bridge：/annotated 生成 <原名>.annotated.html；再次导出写回同一文件；QA 不受嵌入块影响
+  const notes = [{ id: 'n1', name: '1', color: '#30a46c', comment: '标题改短', author: { id: 'u1', name: '' }, time: 1, updated: 1, targets: [{ selector: 'h1', tag: 'h1', text: '样例交付物', route: '', html: '<h1>x</h1>', styles: { a: 1 } }], replies: [], evil: 'x' }, { bad: true }]
+  const an = JSON.parse((await call(`${B}/annotated`, { sessionId: 's', path: 'sample.html', notes, people: { u1: '甲' }, title: '样例' })).body)
+  assert.equal(an.ok, true, an.error)
+  assert.equal(an.path, join(work, 'sample.annotated.html'))
+  assert.equal(an.notes, 1, '无 id 的批注应被丢弃')
+  const { readFileSync } = await import('node:fs')
+  const { readAnnotations, stripAnnotations } = await import('../browser.js')
+  const { gunzipSync } = await import('node:zlib')
+  const annotated = readFileSync(an.path, 'utf8')
+  const data = readAnnotations(annotated)
+  assert.equal(data.format, 'deliver-studio-annotations')
+  assert.deepEqual(Object.keys(data.notes[0].targets[0]).sort(), ['route', 'selector', 'tag', 'text'], '目标只保留定位字段')
+  assert.equal(data.notes[0].evil, undefined)
+  assert.equal(gunzipSync(Buffer.from(data.source, 'base64')).toString('utf8'), SAMPLE, '嵌入的原始页面应与源文件一致')
+  assert.equal(stripAnnotations(annotated), SAMPLE, '去掉嵌入块后应还原源文件')
+  assert.match(annotated, /<script id="deliver-studio-viewer">/u)
+  const an2 = JSON.parse((await call(`${B}/annotated`, { sessionId: 's', path: 'sample.annotated.html', notes: [], docId: data.docId })).body)
+  assert.equal(an2.path, an.path, '带批注文件再次导出应写回它自己')
+  assert.equal(stripAnnotations(readFileSync(an.path, 'utf8')), SAMPLE, '重复导出不能叠加嵌入块')
+  const qa2 = await tool('deliver_qa').execute({ path: 'sample.annotated.html' }, exec())
+  assert.equal(qa2.must, qa.must, 'QA 应忽略嵌入的批注查看器')
+  console.log(`bridge /annotated → ${an.notes} 条批注，${(an.bytes / 1024).toFixed(1)} KB；写回自身、QA 不受影响`)
+
   // 旧配置兼容：只有 edgePath 时也能用
   const routes2 = []
   const ctx2 = { ...ctx, webServer: { register(r) { routes2.push(r); return () => {} } }, tools: { register() { return () => {} } }, commands: { register() { return () => {} } } }

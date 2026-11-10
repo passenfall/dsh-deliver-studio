@@ -340,16 +340,34 @@
   }
   window.__deliverQA = qa
 
-  // ── iframe 交互：选择 · Ask AI、定位 ──────────────────
+  // ── 批注目标查找（与导出 HTML 的 viewer.js 规则一致）──────
+  function normText(s) { return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 40) }
+  function findTarget(t) {
+    if (!t) return null
+    var el = null
+    try { el = t.selector ? document.querySelector(t.selector) : null } catch (e) { el = null }
+    var fp = normText(t.text)
+    if (el && (!fp || normText(el.innerText || el.textContent) === fp)) return el
+    if (!fp || !t.tag) return el && !fp ? el : null
+    var list = document.getElementsByTagName(t.tag)
+    for (var i = 0; i < list.length && i < 4000; i++) if (normText(list[i].innerText || list[i].textContent) === fp && !list[i].closest('[data-deliver-overlay]')) return list[i]
+    return null
+  }
+  window.__deliverFindTarget = findTarget
+
+  // ── iframe 交互：批注、定位、页内导航 ──────────────────
   if (window.parent === window) return
   var mode = 'browse'
   var hover = null
   var marks = []
-  function box(color, dashed) {
+  var scale = 1
+  var SEL = '109,94,252'
+  function post(msg) { msg[TAG] = true; try { window.parent.postMessage(msg, '*') } catch (e) {} }
+  function box(rgb, dashed) {
     var d = document.createElement('div')
     d.setAttribute('data-deliver-overlay', '')
     d.className = '__ds-box'
-    d.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483646;box-sizing:border-box;border:2px ' + (dashed ? 'dashed ' : 'solid ') + color + ';background:' + color.replace(')', ',0.08)').replace('rgb(', 'rgba(') + ';border-radius:3px;transition:all .08s'
+    d.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483645;box-sizing:border-box;border:' + Math.max(1.5, 2 / scale) + 'px ' + (dashed ? 'dashed' : 'solid') + ' rgb(' + rgb + ');background:rgba(' + rgb + ',0.07);border-radius:3px'
     document.documentElement.appendChild(d)
     return d
   }
@@ -360,19 +378,21 @@
   }
   function label(d, text) {
     var t = d.firstChild || d.appendChild(document.createElement('span'))
-    t.style.cssText = 'position:absolute;left:-2px;top:-20px;font:600 11px/18px system-ui,sans-serif;color:#fff;background:rgb(37,99,235);padding:0 6px;border-radius:9px;white-space:nowrap'
+    var fs = Math.round(11 / scale)
+    t.style.cssText = 'position:absolute;left:-2px;top:' + (-fs - 9) + 'px;font:600 ' + fs + 'px/' + (fs + 6) + 'px system-ui,sans-serif;color:#fff;background:rgb(' + SEL + ');padding:0 ' + Math.round(6 / scale) + 'px;border-radius:' + fs + 'px;white-space:nowrap'
     t.textContent = text
   }
-  function post(msg) { msg[TAG] = true; try { window.parent.postMessage(msg, '*') } catch (e) {} }
+  function vrect(el) { var r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) } }
   function describe(el) {
     var cs = getComputedStyle(el)
     var r = el.getBoundingClientRect()
     var html = el.outerHTML
     return {
-      selector: cssPath(el), tag: el.localName,
+      selector: cssPath(el), tag: el.localName, route: location.hash || '',
       text: clip(el.innerText || el.textContent, 200),
       html: html.length > 600 ? html.slice(0, 599) + '…' : html,
       rect: { x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) },
+      vrect: vrect(el),
       styles: {
         fontSize: cs.fontSize, fontWeight: cs.fontWeight, fontFamily: cs.fontFamily.split(',')[0].replace(/["']/g, ''), lineHeight: cs.lineHeight,
         color: cs.color, background: cs.backgroundColor, margin: cs.margin, padding: cs.padding, borderRadius: cs.borderRadius, textAlign: cs.textAlign,
@@ -381,29 +401,125 @@
   }
   function clearMarks() { marks.forEach(function (m) { m.box.remove() }); marks = [] }
   function renumber() { marks.forEach(function (m, i) { label(m.box, String(i + 1)) }) }
+  function sendSelRect() { if (marks.length) post({ type: 'sel-rect', vrect: vrect(marks[marks.length - 1].el) }) }
+
+  // 批注标记层
+  var notes = []
+  var pinLayer = null
+  var pinOutlines = []
+  var focusId = null
+  function pinHost() {
+    if (pinLayer && pinLayer.isConnected) return pinLayer
+    pinLayer = document.createElement('div')
+    pinLayer.setAttribute('data-deliver-overlay', '')
+    pinLayer.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:2147483646'
+    document.documentElement.appendChild(pinLayer)
+    return pinLayer
+  }
+  function onColor(hex) {
+    var c = /^#?([0-9a-f]{6})$/i.exec(hex || '')
+    if (!c) return '#fff'
+    var n = parseInt(c[1], 16)
+    return lum({ r: n >> 16, g: (n >> 8) & 255, b: n & 255 }) > 0.42 ? '#1c1917' : '#fff'
+  }
+  function clearOutlines() { pinOutlines.forEach(function (o) { o.remove() }); pinOutlines = [] }
+  function outline(note) {
+    clearOutlines()
+    ;(note.targets || []).forEach(function (t) {
+      var el = findTarget(t)
+      if (!el) return
+      var o = document.createElement('div')
+      o.setAttribute('data-deliver-overlay', '')
+      o.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483644;box-sizing:border-box;border-radius:3px;border:' + Math.max(1.5, 2 / scale) + 'px solid ' + note.color + ';background:' + note.color + '14'
+      document.documentElement.appendChild(o)
+      place(o, el)
+      pinOutlines.push(o)
+    })
+  }
+  function renderPins() {
+    var host = pinHost()
+    host.textContent = ''
+    var fs = Math.round(11 / scale)
+    var placed = 0
+    notes.forEach(function (n) {
+      var el = findTarget(n.targets && n.targets[0])
+      if (!el || !visible(el)) return
+      var r = el.getBoundingClientRect()
+      var right = r.right
+      // 标记贴在文字末尾的右上角（与 viewer.js 一致）
+      try { var rg = document.createRange(); rg.selectNodeContents(el); var tr = rg.getBoundingClientRect(); if (tr.width > 0 && tr.right < right) right = Math.max(r.left + 24, tr.right + 6) } catch (e) {}
+      var p = document.createElement('button')
+      p.type = 'button'
+      p.setAttribute('data-note', n.id)
+      p.title = n.comment || ''
+      p.textContent = n.label
+      var focused = n.id === focusId
+      p.style.cssText = 'all:initial;position:absolute;box-sizing:border-box;cursor:pointer;font:700 ' + fs + 'px/' + (fs + 8) + 'px system-ui,-apple-system,sans-serif;min-width:' + (fs + 8) + 'px;height:' + (fs + 8) + 'px;padding:0 ' + Math.round(6 / scale) + 'px;border-radius:' + (fs + 8) + 'px ' + (fs + 8) + 'px ' + (fs + 8) + 'px 2px;text-align:center;white-space:nowrap;max-width:' + Math.round(160 / scale) + 'px;overflow:hidden;text-overflow:ellipsis;background:' + n.color + ';color:' + onColor(n.color) + ';box-shadow:0 0 0 ' + Math.max(1.5, 2 / scale) + 'px #fff,0 2px 6px rgba(0,0,0,.25)' + (focused ? ',0 0 0 ' + Math.round(5 / scale) + 'px ' + n.color + '66' : '')
+      p.style.left = Math.max(0, right + window.scrollX - fs - 4) + 'px'
+      p.style.top = Math.max(0, r.top + window.scrollY - fs - 4) + 'px'
+      p.addEventListener('mouseenter', function () { outline(n) })
+      p.addEventListener('mouseleave', clearOutlines)
+      p.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); post({ type: 'pin', id: n.id }) }, true)
+      host.appendChild(p)
+      placed++
+    })
+    post({ type: 'pins', shown: placed })
+  }
+  var pinTimer = 0
+  function schedulePins() { if (!notes.length && !(pinLayer && pinLayer.firstChild)) return; clearTimeout(pinTimer); pinTimer = setTimeout(function () { renderPins(); marks.forEach(function (m) { place(m.box, m.el) }) }, 120) }
+  if (window.MutationObserver) new MutationObserver(function (list) {
+    for (var i = 0; i < list.length; i++) { var t = list[i].target; if (!(t.closest && t.closest('[data-deliver-overlay]')) && t !== document.documentElement) { schedulePins(); return } }
+  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true })
+
+  function isOverlay(el) { return !el || el === document.documentElement || (el.closest && el.closest('[data-deliver-overlay]')) }
   document.addEventListener('mousemove', function (e) {
     if (mode !== 'select') return
     var el = e.target
-    if (!el || el === document.documentElement || el === document.body || el.hasAttribute('data-deliver-overlay')) { if (hover) hover.style.display = 'none'; return }
-    if (!hover) hover = box('rgb(37,99,235)', true)
+    if (isOverlay(el) || el === document.body) { if (hover) hover.style.display = 'none'; return }
+    if (!hover) hover = box(SEL, true)
     place(hover, el)
   }, true)
+  // 批注模式下吞掉页面自身的按下/点击，避免误触发页面逻辑
+  ;['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'dblclick', 'submit'].forEach(function (type) {
+    document.addEventListener(type, function (e) { if (mode === 'select' && !isOverlay(e.target)) { e.preventDefault(); e.stopPropagation() } }, true)
+  })
   document.addEventListener('click', function (e) {
     if (mode !== 'select') return
-    e.preventDefault(); e.stopPropagation()
     var el = e.target
-    if (!el || el === document.documentElement || el.hasAttribute('data-deliver-overlay')) return
+    if (isOverlay(el)) return
+    e.preventDefault(); e.stopPropagation()
     var existing = marks.findIndex(function (m) { return m.el === el })
-    if (existing >= 0) { marks[existing].box.remove(); marks.splice(existing, 1); renumber(); post({ type: 'unselect', selector: cssPath(el) }); return }
+    if (existing >= 0) { marks[existing].box.remove(); marks.splice(existing, 1); renumber(); post({ type: 'unselect', selector: cssPath(el) }); sendSelRect(); return }
     if (!e.shiftKey) clearMarks()
-    var b = box('rgb(37,99,235)', false)
+    var b = box(SEL, false)
     place(b, el)
     marks.push({ el: el, box: b })
     renumber()
     post({ type: 'select', additive: !!e.shiftKey, item: describe(el) })
   }, true)
-  window.addEventListener('scroll', function () { marks.forEach(function (m) { place(m.box, m.el) }) }, true)
-  window.addEventListener('resize', function () { marks.forEach(function (m) { place(m.box, m.el) }) })
+  // 浏览模式：页内锚点交给页面自己处理；站外链接和相对路径的其它文件交给工作台打开
+  document.addEventListener('click', function (e) {
+    if (mode !== 'browse' || e.defaultPrevented) return
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null
+    if (!a || isOverlay(a)) return
+    var href = (a.getAttribute('href') || '').trim()
+    if (!href || href[0] === '#' || /^javascript:/i.test(href)) return
+    e.preventDefault()
+    if (/^https?:\/\//i.test(href)) post({ type: 'open-url', href: href })
+    else if (!/^[a-z][a-z\d+.-]*:/i.test(href)) post({ type: 'open-file', href: href })
+  }, false)
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') post({ type: 'esc' }); else if (e.key === 'Shift' && mode === 'select' && !e.repeat) post({ type: 'shift', down: true }) }, true)
+  document.addEventListener('keyup', function (e) { if (e.key === 'Shift') post({ type: 'shift', down: false }) }, true)
+  window.addEventListener('blur', function () { post({ type: 'shift', down: false }) })
+  var rafPending = false
+  function onScroll() {
+    if (rafPending) return
+    rafPending = true
+    requestAnimationFrame(function () { rafPending = false; marks.forEach(function (m) { place(m.box, m.el) }); sendSelRect(); if (pinLayer && pinLayer.firstChild) renderPins(); if (pinOutlines.length) clearOutlines() })
+  }
+  window.addEventListener('scroll', onScroll, true)
+  window.addEventListener('resize', onScroll)
+  window.addEventListener('hashchange', function () { post({ type: 'route', hash: location.hash }); schedulePins() })
   window.addEventListener('message', function (e) {
     var d = e.data
     if (!d || d[TAG] !== true || e.source !== window.parent) return
@@ -412,25 +528,45 @@
       if (hover) hover.style.display = 'none'
       if (mode !== 'select') clearMarks()
       document.documentElement.style.cursor = mode === 'select' ? 'crosshair' : ''
+    } else if (d.type === 'scale') {
+      scale = Math.max(0.25, Math.min(1, Number(d.scale) || 1)); renumber(); if (notes.length) renderPins()
     } else if (d.type === 'clear') {
       clearMarks()
+    } else if (d.type === 'notes') {
+      notes = d.notes || []; focusId = d.focus || null; renderPins()
+    } else if (d.type === 'route') {
+      if (typeof d.hash === 'string' && d.hash !== location.hash) location.hash = d.hash
     } else if (d.type === 'qa') {
-      var result
-      try { result = qa(d.options || {}) } catch (err) { result = { version: VERSION, error: String(err && err.message || err), issues: [], stats: {} } }
-      post({ type: 'qa-result', id: d.id, result: result })
+      whenLaidOut(function () {
+        var result
+        try { result = qa(d.options || {}) } catch (err) { result = { version: VERSION, error: String(err && err.message || err), issues: [], stats: {} } }
+        post({ type: 'qa-result', id: d.id, result: result })
+      })
     } else if (d.type === 'locate') {
-      var el = null
-      try { el = d.selector ? document.querySelector(d.selector) : null } catch (err) { el = null }
-      if (!el) { post({ type: 'locate-miss', selector: d.selector }); return }
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-      var flash = box('rgb(220,38,38)', false)
-      setTimeout(function () { place(flash, el) }, 350)
-      setTimeout(function () { flash.remove() }, 2200)
+      locate(d, false)
     }
   })
-  post({ type: 'ready', title: document.title || '', url: location.href })
+  function locate(d, retried) {
+    var el = null
+    if (d.target) el = findTarget(d.target)
+    else { try { el = d.selector ? document.querySelector(d.selector) : null } catch (err) { el = null } }
+    // 目标在 SPA 的其它路由上：先切过去再找一次
+    if (!el && !retried && d.target && typeof d.target.route === 'string' && d.target.route !== location.hash) {
+      location.hash = d.target.route
+      setTimeout(function () { locate(d, true) }, 500)
+      return
+    }
+    if (!el) { post({ type: 'locate-miss', selector: d.selector || (d.target && d.target.selector) }); return }
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    var flash = box('220,38,38', false)
+    setTimeout(function () { place(flash, el) }, 350)
+    setTimeout(function () { flash.remove() }, 2200)
+  }
+  // 页面加载完且完成首次布局后才算就绪：布局前 innerText 会退化成 textContent、尺寸全为 0，QA 结果不可信
+  function whenLaidOut(fn) {
+    function go() { requestAnimationFrame(function () { requestAnimationFrame(function () { if (window.innerWidth > 0) fn(); else setTimeout(go, 50) }) }) }
+    if (document.readyState === 'complete') go()
+    else window.addEventListener('load', go, { once: true })
+  }
+  whenLaidOut(function () { post({ type: 'ready', title: document.title || '', url: location.href, hash: location.hash }) })
 })()
-
-
-
-

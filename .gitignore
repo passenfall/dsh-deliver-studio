@@ -1,3 +1,6 @@
 node_modules/
 test/out/
 *.log
+.e2e-*.png
+.e2e-shots/
+dist/

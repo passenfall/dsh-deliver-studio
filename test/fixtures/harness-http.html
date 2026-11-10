@@ -23,7 +23,6 @@ window.__ModuleLoader__ = { load(m) { window.__mod = m.factory((name) => window.
       catch (e) { return { ok: false, error: { message: String(e), details: {} } } }
     }
     const bundle = await packDocument(data, readRelated, 'dsh-resource://file/session/s1/x.html', new AbortController().signal)
-    const url = URL.createObjectURL(new Blob([frameDocument(bundle)], { type: 'text/html' }))
     const iframe = document.createElement('iframe')
     if (!new URLSearchParams(location.search).get('nosb')) iframe.sandbox = 'allow-scripts'; iframe.style.cssText = 'width:1440px;height:900px;border:0'
     const events = []
@@ -38,7 +37,7 @@ window.__ModuleLoader__ = { load(m) { window.__mod = m.factory((name) => window.
         if (e.data.type === 'qa-result') resolve(e.data.result)
       })
     })
-    iframe.src = url
+    iframe.srcdoc = frameDocument(bundle) // 与工作台一致：srcdoc 装载，页面内 hash 路由可用
     document.body.appendChild(iframe)
     const r = await Promise.race([result, new Promise((res) => setTimeout(() => res({ timeout: true }), 15000))])
     let dbg = {}

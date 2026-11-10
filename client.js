@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useState, useEffect, useMemo, useRef, useCallback } = React
 
-    const RUNTIME = "/* Deliver Studio · 页面内运行时（iframe 与无头浏览器共用）\n * - window.__deliverQA(options) → { version, stats, issues }\n * - 在 iframe 中：与父窗口用 postMessage 通信（选择 · Ask AI、定位、QA）\n * 纯浏览器脚本，无依赖；不访问父页面，只发送结构化数据。 */\n(function () {\n  'use strict'\n  if (window.__deliverRuntime) return\n  window.__deliverRuntime = true\n  var VERSION = 1\n  var TAG = '__deliverStudio'\n  var CJK = /[\\u3400-\\u9fff\\uf900-\\ufaff]/\n  var CJK_G = /[\\u3400-\\u9fff\\uf900-\\ufaff]/g\n\n  // ── 工具 ────────────────────────────────────────────\n  function cssEscape(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&') }\n  function cssPath(el) {\n    if (!el || el.nodeType !== 1) return ''\n    if (el.id && document.querySelectorAll('#' + cssEscape(el.id)).length === 1) return '#' + cssEscape(el.id)\n    var parts = []\n    var cur = el\n    while (cur && cur.nodeType === 1 && cur !== document.documentElement) {\n      if (cur.id && document.querySelectorAll('#' + cssEscape(cur.id)).length === 1) { parts.unshift('#' + cssEscape(cur.id)); break }\n      var name = cur.localName\n      var cls = Array.prototype.filter.call(cur.classList || [], function (c) { return !/^__ds/.test(c) && /^[a-zA-Z_-][\\w-]*$/.test(c) }).slice(0, 2)\n      var part = name + (cls.length ? '.' + cls.map(cssEscape).join('.') : '')\n      var parent = cur.parentElement\n      if (parent) {\n        var same = Array.prototype.filter.call(parent.children, function (c) { return c.localName === name })\n        if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')'\n      }\n      parts.unshift(part)\n      if (name === 'body') break\n      cur = parent\n    }\n    return parts.join(' > ')\n  }\n  function visible(el) {\n    var cs = getComputedStyle(el)\n    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) return false\n    var r = el.getBoundingClientRect()\n    return r.width > 0 && r.height > 0\n  }\n  function ownText(el) {\n    var s = ''\n    for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3) s += n.nodeValue\n    return s.replace(/\\s+/g, ' ').trim()\n  }\n  function clip(s, n) { s = String(s || '').replace(/\\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s }\n  function parseColor(c) {\n    var m = /rgba?\\(([^)]+)\\)/.exec(c || '')\n    if (!m) return null\n    var p = m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number)\n    return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }\n  }\n  function lum(c) {\n    function ch(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }\n    return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)\n  }\n  function blend(top, bottom) {\n    var a = top.a\n    return { r: top.r * a + bottom.r * (1 - a), g: top.g * a + bottom.g * (1 - a), b: top.b * a + bottom.b * (1 - a), a: 1 }\n  }\n  function effectiveBg(el) {\n    var layers = []\n    for (var cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) {\n      var cs = getComputedStyle(cur)\n      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null\n      var c = parseColor(cs.backgroundColor)\n      if (c && c.a > 0) { layers.push(c); if (c.a >= 1) break }\n    }\n    var base = { r: 255, g: 255, b: 255, a: 1 }\n    for (var i = layers.length - 1; i >= 0; i--) base = blend(layers[i], base)\n    return base\n  }\n  function hex(c) { return '#' + [c.r, c.g, c.b].map(function (v) { return ('0' + Math.round(v).toString(16)).slice(-2) }).join('') }\n\n  // ── QA ─────────────────────────────────────────────\n  var DEFAULT_BANNED = ['TODO', 'TBD', 'FIXME', '待补充', '此处替换', 'Lorem ipsum']\n  // 正文引用：中文「如/见/参见/详见/参考/据 图|表 N」；英文「see / in / cf. / refer to / according to Figure|Fig.|Table N」与「(Figure N)」「(see Table N)」\n  // 每处引用只匹配一次（同一位置的「(see …)」走括号分支，不会再被 see 分支重复匹配）\n  var REF_RES = [\n    /(?:如|见|参见|详见|参考|据)\\s*(图|表)\\s*([0-9]+)/g,\n    /(?:\\b(?:see|in|cf\\.?|refer\\s+to|according\\s+to)\\s+|\\(\\s*(?:see\\s+)?)(Figures?|Figs?\\.?|Tables?)\\s*([0-9]+)/gi,\n  ]\n  // 行内元素前面紧跟这些引导词时，它是引用（「见<a>图2</a>」「see <a>Fig. 2</a>」），不是图注\n  var REF_LEAD = /(?:如|见|参见|详见|参考|据|\\bsee|\\bin|\\bcf\\.?|\\brefer\\s+to|\\baccording\\s+to|\\(\\s*(?:see)?)\\s*$/i\n  function refKind(word) { return /^(表|tab)/i.test(word) ? '表' : '图' }\n  function textBefore(el) {\n    var s = ''\n    for (var n = el.previousSibling; n && s.length < 40; n = n.previousSibling) s = (n.textContent || '') + s\n    return s.slice(-40)\n  }\n\n  function qa(options) {\n    options = options || {}\n    var issues = []\n    var seq = 0\n    function add(cat, level, title, detail, el, fix, extra) {\n      var it = { id: 'q' + (++seq), cat: cat, level: level, title: title, detail: detail || '', selector: el ? cssPath(el) : '', fix: fix || '' }\n      if (extra) for (var k in extra) it[k] = extra[k]\n      issues.push(it)\n      return it\n    }\n    var body = document.body\n    if (!body) return { version: VERSION, stats: {}, issues: [] }\n    var all = Array.prototype.slice.call(body.querySelectorAll('*'), 0, 8000).filter(function (el) { return !(el.className && String(el.className).indexOf('__ds') === 0) && !el.closest('[data-deliver-overlay]') })\n    var textEls = all.filter(function (el) { return !/^(script|style|noscript|template|svg|path|defs)$/.test(el.localName) && ownText(el).length > 0 && visible(el) })\n\n    // 1) 编号：图 / 表 连续、正文引用存在\n    var capRe = /^\\s*(图|表|Figure|Fig\\.?|Table)\\s*([0-9]+)/i\n    var caps = { 图: [], 表: [] }\n    var capEls = []\n    var inlineRefs = []\n    all.forEach(function (el) {\n      if (!visible(el)) return\n      var t = (el.innerText || '').trim()\n      if (!t || t.length > 140) return\n      var m = capRe.exec(t)\n      if (!m) return\n      if (el.querySelector && Array.prototype.some.call(el.children, function (c) { return capRe.test((c.innerText || '').trim()) })) return\n      var kind = refKind(m[1])\n      // 行内引用不算图注，交给下面的引用检查（避免同一处既算图注又算引用）\n      if (getComputedStyle(el).display === 'inline' && REF_LEAD.test(textBefore(el))) { inlineRefs.push({ kind: kind, n: Number(m[2]), el: el, text: (el.parentElement && el.parentElement.innerText) || t }); return }\n      caps[kind].push({ n: Number(m[2]), el: el, text: t })\n      capEls.push(el)\n    })\n    ;['图', '表'].forEach(function (kind) {\n      // 角标「Fig. 3」与图注「Fig. 3 — …」相邻出现时只算一次\n      var list = caps[kind].filter(function (c, i, arr) { return !(i > 0 && arr[i - 1].n === c.n && (c.text.length <= 10 || arr[i - 1].text.length <= 10)) })\n      caps[kind] = list\n      var seen = {}\n      list.forEach(function (c, i) {\n        var expect = i === 0 ? 1 : list[i - 1].n + 1\n        if (seen[c.n]) add('numbering', 'must', kind + c.n + ' 重复编号', '「' + clip(c.text, 40) + '」与前面的' + kind + c.n + '重复', c.el, '按出现顺序重新编号')\n        else if (c.n !== expect) add('numbering', 'must', kind + '编号不连续：应为' + kind + expect + '，实际是' + kind + c.n, '「' + clip(c.text, 40) + '」', c.el, '按出现顺序从' + kind + '1 开始连续编号，并同步正文里的引用')\n        seen[c.n] = true\n      })\n    })\n    var refSeen = {}\n    function checkRef(kind, n, el, t) {\n      if (caps[kind].some(function (c) { return c.n === n }) || refSeen[kind + n]) return\n      refSeen[kind + n] = true\n      add('numbering', 'must', '正文引用了' + kind + n + '，但页面里没有' + kind + n, '「' + clip(t, 50) + '」', el, '核对引用编号，或补上对应的' + kind)\n    }\n    textEls.forEach(function (el) {\n      if (capEls.indexOf(el) >= 0) return\n      var t = ownText(el)\n      REF_RES.forEach(function (re) {\n        var m\n        re.lastIndex = 0\n        while ((m = re.exec(t))) checkRef(refKind(m[1]), Number(m[2]), el, t)\n      })\n    })\n    inlineRefs.forEach(function (r) { checkRef(r.kind, r.n, r.el, r.text) })\n\n    // 2) 文本：孤字、截断、横向溢出、超长行\n    var orphanCount = 0\n    var blockSel = /^(p|li|h[1-6]|td|th|figcaption|dd|dt|blockquote|div|span|a|label|caption)$/\n    textEls.forEach(function (el) {\n      if (orphanCount >= 40 || !blockSel.test(el.localName)) return\n      var cs = getComputedStyle(el)\n      if (cs.display === 'inline' || cs.whiteSpace === 'nowrap') return\n      var txt = (el.innerText || '').replace(/\\s+/g, '')\n      if (txt.length < 6) return\n      var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)\n      var nodes = []\n      for (var n = walker.nextNode(); n; n = walker.nextNode()) if (n.nodeValue.trim()) nodes.push(n)\n      if (!nodes.length) return\n      var range = document.createRange()\n      var lastTop = null, firstTop = null, count = 0, done = false\n      try {\n        range.setStart(nodes[0], 0); range.setEnd(nodes[0], 1)\n        var fr = range.getClientRects()[0]; firstTop = fr ? fr.top : null\n        for (var i = nodes.length - 1; i >= 0 && !done; i--) {\n          var v = nodes[i].nodeValue\n          for (var j = v.length - 1; j >= 0; j--) {\n            if (/\\s/.test(v[j])) continue\n            range.setStart(nodes[i], j); range.setEnd(nodes[i], j + 1)\n            var r = range.getClientRects()[0]\n            if (!r) continue\n            if (lastTop === null) { lastTop = r.top; count = 1; continue }\n            if (Math.abs(r.top - lastTop) < Math.max(2, r.height * 0.4)) { count++; if (count > 3) { done = true; break } } else { done = true; break }\n          }\n        }\n      } catch (e) { return }\n      if (lastTop === null || firstTop === null || count > 2 || Math.abs(lastTop - firstTop) < 2) return\n      orphanCount++\n      var tail = txt.slice(-count)\n      add('text', /^h[1-6]$/.test(el.localName) ? 'must' : 'must', (/^h[1-6]$/.test(el.localName) ? '标题' : '段落') + '末行只剩「' + tail + '」', '「…' + clip(txt.slice(-24), 26) + '」最后一行只有 ' + count + ' 个字', el, '精简几个字、调整字号/字距，或给该元素加 text-wrap: pretty')\n    })\n    var docW = document.documentElement.scrollWidth, winW = window.innerWidth\n    if (docW > winW + 2) {\n      var offenders = all.filter(function (el) { var r = el.getBoundingClientRect(); return r.right > winW + 2 && r.width > 0 && visible(el) })\n      var outer = offenders.filter(function (el) { return offenders.indexOf(el.parentElement) < 0 })\n      var canvas = outer.find(function (el) { return (el.parentElement === body || el === body) && el.getBoundingClientRect().width > winW && /px$/.test(getComputedStyle(el).width) && (el.style.width || /^\\d/.test(getComputedStyle(el).minWidth) || el.getBoundingClientRect().width >= winW * 1.05) })\n      if (canvas) add('layout', 'hint', '固定宽度画布 ' + Math.round(canvas.getBoundingClientRect().width) + 'px', '页面按固定宽度设计（海报/长图），当前视口 ' + winW + 'px 需要横向滚动', canvas, '确认这是预期的画布尺寸；导出 PDF 时会按纸张缩放')\n      else add('text', 'must', '页面横向溢出 ' + (docW - winW) + 'px', '视口宽 ' + winW + 'px，内容宽 ' + docW + 'px', outer[0] || null, '检查固定宽度、长单词和图片的 max-width')\n    }\n    var clipCount = 0\n    all.forEach(function (el) {\n      if (clipCount >= 15 || !visible(el)) return\n      var cs = getComputedStyle(el)\n      var clipX = cs.overflowX === 'hidden' || cs.overflowX === 'clip'\n      var clipY = cs.overflowY === 'hidden' || cs.overflowY === 'clip'\n      var ellipsis = cs.textOverflow === 'ellipsis' || Number(cs.webkitLineClamp) > 0\n      if (!clipX && !clipY && !ellipsis) return\n      // 只看自身直接承载文字的元素（容器里装饰性大字溢出不算）\n      if (!ownText(el)) return\n      if ((clipX || ellipsis) && el.scrollWidth > el.clientWidth + 2 || (clipY || ellipsis) && el.scrollHeight > el.clientHeight + 3) {\n        clipCount++\n        add('text', 'must', '文字被截断', '「' + clip(el.innerText, 40) + '」容器 ' + el.clientWidth + '×' + el.clientHeight + '，内容 ' + el.scrollWidth + '×' + el.scrollHeight, el, '放宽容器或精简文字，避免 overflow:hidden 吞字')\n      }\n    })\n    var longCount = 0\n    textEls.forEach(function (el) {\n      if (longCount >= 5 || el.localName !== 'p') return\n      var fs = parseFloat(getComputedStyle(el).fontSize) || 16\n      var w = el.getBoundingClientRect().width\n      if (w / fs > 48 && (el.innerText || '').length > 120) { longCount++; add('text', 'hint', '行宽过长（约 ' + Math.round(w / fs) + ' 字/行）', '正文每行超过 48 个字，阅读吃力', el, '给正文容器设置 max-width（约 36–42em）') }\n    })\n\n    // 3) 版式：A4/幻灯片页面的留白与溢出\n    var pages = all.filter(function (el) {\n      if (!visible(el)) return false\n      var r = el.getBoundingClientRect()\n      if (r.width < 280 || r.height < 300) return false\n      var ratio = r.height / r.width\n      var cs = getComputedStyle(el)\n      var named = /(^|[\\s_-])(page|sheet|slide|a4|paper|poster)([\\s_-]|$)/i.test(el.className && typeof el.className === 'string' ? el.className : '')\n      var fixed = cs.overflow === 'hidden' || cs.overflowY === 'hidden' || cs.overflow === 'clip'\n      var breaks = cs.breakAfter === 'page' || cs.pageBreakAfter === 'always' || cs.breakBefore === 'page' || cs.pageBreakBefore === 'always'\n      var a4 = Math.abs(ratio - 1.4142) < 0.06\n      var slide = Math.abs(ratio - 0.5625) < 0.03 && named\n      return (named && (fixed || breaks || a4)) || (a4 && r.width >= 700 && r.width <= 900) || slide || (breaks && r.height > 400)\n    })\n    pages = pages.filter(function (p) { return !pages.some(function (q) { return q !== p && q.contains(p) }) })\n    pages.forEach(function (p, i) {\n      var pr = p.getBoundingClientRect()\n      var cs = getComputedStyle(p)\n      var padT = parseFloat(cs.paddingTop) || 0, padB = parseFloat(cs.paddingBottom) || 0\n      var bottom = pr.top + padT, overflow = 0\n      Array.prototype.forEach.call(p.querySelectorAll('*'), function (d) {\n        if (!visible(d)) return\n        var hasContent = ownText(d) || /^(img|svg|canvas|video|table)$/.test(d.localName)\n        if (!hasContent) return\n        var r = d.getBoundingClientRect()\n        if (r.bottom > bottom) bottom = r.bottom\n        if (r.bottom > pr.bottom + 2) overflow = Math.max(overflow, r.bottom - pr.bottom)\n      })\n      var usable = pr.height - padT - padB\n      var fill = usable > 0 ? (bottom - pr.top - padT) / usable : 1\n      var label = '第' + (i + 1) + '页'\n      if (overflow > 0) add('layout', 'must', label + '内容溢出页面 ' + Math.round(overflow) + 'px', '导出 PDF 时会被裁掉或挤到下一页', p, '精简内容、缩小图表或拆页', { page: i + 1 })\n      else if (fill < 0.65) add('layout', fill < 0.5 ? 'must' : 'hint', label + '留白 ' + Math.round((1 - fill) * 100) + '%', '内容只占可用高度的 ' + Math.round(fill * 100) + '%', p, '补充内容、放大图表，或与相邻页合并', { page: i + 1 })\n      var heads = p.querySelectorAll('h1,h2,h3,h4')\n      if (heads.length) {\n        var last = heads[heads.length - 1], lr = last.getBoundingClientRect()\n        if (lr.top > pr.bottom - usable * 0.15 && lr.bottom <= pr.bottom && Math.abs(lr.bottom - bottom) < 4) add('layout', 'hint', label + '标题落在页底', '「' + clip(last.innerText, 30) + '」后面没有正文', last, '把标题移到下一页或在前面压缩内容', { page: i + 1 })\n      }\n    })\n\n    // 4) 视觉：对比度、字体与字号种类\n    var pairs = {}\n    textEls.forEach(function (el) {\n      var cs = getComputedStyle(el)\n      var fg = parseColor(cs.color)\n      if (!fg) return\n      var bg = effectiveBg(el)\n      if (!bg) return\n      var f = fg.a < 1 ? blend(fg, bg) : fg\n      var l1 = lum(f), l2 = lum(bg)\n      var ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05)\n      var size = parseFloat(cs.fontSize) || 16\n      var bold = Number(cs.fontWeight) >= 700\n      var large = size >= 24 || (bold && size >= 18.66)\n      var need = large ? 3 : 4.5\n      if (ratio >= need) return\n      var key = hex(f) + '/' + hex(bg) + '/' + (large ? 'L' : 'N')\n      if (!pairs[key]) pairs[key] = { ratio: ratio, need: need, el: el, n: 0, fg: hex(f), bg: hex(bg) }\n      pairs[key].n++\n    })\n    Object.keys(pairs).slice(0, 15).forEach(function (k) {\n      var p = pairs[k]\n      add('visual', p.ratio < 3 ? 'must' : 'hint', '对比度不足 ' + p.ratio.toFixed(2) + ':1（需 ≥' + p.need + '）', '文字 ' + p.fg + ' 在背景 ' + p.bg + ' 上，共 ' + p.n + ' 处，如「' + clip(p.el.innerText, 24) + '」', p.el, '加深文字或调浅背景，使对比度达到 WCAG AA')\n    })\n    var fams = {}, sizes = {}\n    textEls.forEach(function (el) {\n      var cs = getComputedStyle(el)\n      var fam = (cs.fontFamily || '').split(',')[0].replace(/[\"']/g, '').trim().toLowerCase()\n      fams[fam] = (fams[fam] || 0) + 1\n      sizes[Math.round(parseFloat(cs.fontSize))] = (sizes[Math.round(parseFloat(cs.fontSize))] || 0) + 1\n    })\n    var famList = Object.keys(fams)\n    if (famList.length > 3) add('visual', 'hint', '字体种类过多（' + famList.length + ' 种）', famList.slice(0, 6).join('、'), null, '正文、标题、数字各用一种字体即可')\n    var sizeList = Object.keys(sizes).map(Number).sort(function (a, b) { return a - b })\n    if (sizeList.length > 8) add('visual', 'hint', '字号种类过多（' + sizeList.length + ' 种）', sizeList.join(' / ') + ' px', null, '收敛到 5–6 级字号')\n\n    // 5) 资源：图片失败、拉伸、分辨率；页内锚点\n    Array.prototype.forEach.call(document.images, function (img) {\n      if (!visible(img)) return\n      if (img.complete && img.naturalWidth === 0) { add('asset', 'must', '图片加载失败', img.getAttribute('src') ? clip(img.getAttribute('src'), 60) : '(无 src)', img, '检查图片路径；导出 PDF 前必须能加载'); return }\n      if (!img.naturalWidth) return\n      var r = img.getBoundingClientRect()\n      var fit = getComputedStyle(img).objectFit\n      var dr = r.width / r.height, nr = img.naturalWidth / img.naturalHeight\n      if ((fit === 'fill' || !fit) && Math.abs(dr - nr) / nr > 0.05) add('asset', 'must', '图片被拉伸 ' + Math.round(Math.abs(dr - nr) / nr * 100) + '%', '显示 ' + Math.round(r.width) + '×' + Math.round(r.height) + '，原图 ' + img.naturalWidth + '×' + img.naturalHeight, img, '只固定宽或高，另一边用 auto，或用 object-fit: contain')\n      else if (img.naturalWidth < r.width * 1.5 && r.width > 240) add('asset', 'hint', '图片分辨率偏低', '显示宽 ' + Math.round(r.width) + 'px，原图仅 ' + img.naturalWidth + 'px，打印会发糊', img, '换用至少 2 倍尺寸的图片')\n    })\n    var deadSeen = {}\n    Array.prototype.forEach.call(document.querySelectorAll('a[href^=\"#\"]'), function (a) {\n      var id = decodeURIComponent(a.getAttribute('href').slice(1))\n      if (!id || deadSeen[id]) return\n      if (!document.getElementById(id) && !document.getElementsByName(id).length) { deadSeen[id] = true; add('asset', 'hint', '页内链接指向不存在的位置 #' + clip(id, 30), '「' + clip(a.innerText, 30) + '」', a, '核对目录锚点与标题 id') }\n    })\n\n    // 6) 交付规范：禁用字样、字数\n    var banned = (options.bannedWords && options.bannedWords.length ? options.bannedWords : DEFAULT_BANNED).filter(Boolean)\n    var bannedHit = {}\n    textEls.forEach(function (el) {\n      var t = ownText(el)\n      banned.forEach(function (w) {\n        if (!bannedHit[w] && t.indexOf(w) >= 0) { bannedHit[w] = true; add('delivery', 'must', '出现禁用字样「' + w + '」', '「' + clip(t, 50) + '」', el, '交付稿不应出现过程性字样，删掉这一段') }\n      })\n    })\n    var text = body.innerText || ''\n    var cjk = (text.match(CJK_G) || []).length\n    var words = (text.replace(CJK_G, ' ').match(/[A-Za-z][A-Za-z'’-]*/g) || []).length\n    var stats = {\n      cjk: cjk, words: words, chars: cjk + words,\n      figures: caps['图'].length, tables: caps['表'].length, images: document.images.length,\n      pages: pages.length, fonts: famList.length, fontSizes: sizeList.length,\n      viewport: winW + '×' + window.innerHeight, title: document.title || '',\n    }\n    if (options.targetChars > 0) {\n      var dev = (stats.chars - options.targetChars) / options.targetChars\n      if (Math.abs(dev) > 0.1) add('delivery', 'hint', '字数 ' + stats.chars + '，与目标 ' + options.targetChars + ' 相差 ' + Math.round(dev * 100) + '%', '中文字 ' + cjk + '、英文词 ' + words, null, dev > 0 ? '精简内容' : '补充内容')\n    }\n    var must = issues.filter(function (i) { return i.level === 'must' }).length\n    return { version: VERSION, stats: stats, issues: issues, must: must, hint: issues.length - must }\n  }\n  window.__deliverQA = qa\n\n  // ── iframe 交互：选择 · Ask AI、定位 ──────────────────\n  if (window.parent === window) return\n  var mode = 'browse'\n  var hover = null\n  var marks = []\n  function box(color, dashed) {\n    var d = document.createElement('div')\n    d.setAttribute('data-deliver-overlay', '')\n    d.className = '__ds-box'\n    d.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483646;box-sizing:border-box;border:2px ' + (dashed ? 'dashed ' : 'solid ') + color + ';background:' + color.replace(')', ',0.08)').replace('rgb(', 'rgba(') + ';border-radius:3px;transition:all .08s'\n    document.documentElement.appendChild(d)\n    return d\n  }\n  function place(d, el) {\n    var r = el.getBoundingClientRect()\n    d.style.left = (r.left + window.scrollX) + 'px'; d.style.top = (r.top + window.scrollY) + 'px'\n    d.style.width = r.width + 'px'; d.style.height = r.height + 'px'; d.style.display = 'block'\n  }\n  function label(d, text) {\n    var t = d.firstChild || d.appendChild(document.createElement('span'))\n    t.style.cssText = 'position:absolute;left:-2px;top:-20px;font:600 11px/18px system-ui,sans-serif;color:#fff;background:rgb(37,99,235);padding:0 6px;border-radius:9px;white-space:nowrap'\n    t.textContent = text\n  }\n  function post(msg) { msg[TAG] = true; try { window.parent.postMessage(msg, '*') } catch (e) {} }\n  function describe(el) {\n    var cs = getComputedStyle(el)\n    var r = el.getBoundingClientRect()\n    var html = el.outerHTML\n    return {\n      selector: cssPath(el), tag: el.localName,\n      text: clip(el.innerText || el.textContent, 200),\n      html: html.length > 600 ? html.slice(0, 599) + '…' : html,\n      rect: { x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) },\n      styles: {\n        fontSize: cs.fontSize, fontWeight: cs.fontWeight, fontFamily: cs.fontFamily.split(',')[0].replace(/[\"']/g, ''), lineHeight: cs.lineHeight,\n        color: cs.color, background: cs.backgroundColor, margin: cs.margin, padding: cs.padding, borderRadius: cs.borderRadius, textAlign: cs.textAlign,\n      },\n    }\n  }\n  function clearMarks() { marks.forEach(function (m) { m.box.remove() }); marks = [] }\n  function renumber() { marks.forEach(function (m, i) { label(m.box, String(i + 1)) }) }\n  document.addEventListener('mousemove', function (e) {\n    if (mode !== 'select') return\n    var el = e.target\n    if (!el || el === document.documentElement || el === document.body || el.hasAttribute('data-deliver-overlay')) { if (hover) hover.style.display = 'none'; return }\n    if (!hover) hover = box('rgb(37,99,235)', true)\n    place(hover, el)\n  }, true)\n  document.addEventListener('click', function (e) {\n    if (mode !== 'select') return\n    e.preventDefault(); e.stopPropagation()\n    var el = e.target\n    if (!el || el === document.documentElement || el.hasAttribute('data-deliver-overlay')) return\n    var existing = marks.findIndex(function (m) { return m.el === el })\n    if (existing >= 0) { marks[existing].box.remove(); marks.splice(existing, 1); renumber(); post({ type: 'unselect', selector: cssPath(el) }); return }\n    if (!e.shiftKey) clearMarks()\n    var b = box('rgb(37,99,235)', false)\n    place(b, el)\n    marks.push({ el: el, box: b })\n    renumber()\n    post({ type: 'select', additive: !!e.shiftKey, item: describe(el) })\n  }, true)\n  window.addEventListener('scroll', function () { marks.forEach(function (m) { place(m.box, m.el) }) }, true)\n  window.addEventListener('resize', function () { marks.forEach(function (m) { place(m.box, m.el) }) })\n  window.addEventListener('message', function (e) {\n    var d = e.data\n    if (!d || d[TAG] !== true || e.source !== window.parent) return\n    if (d.type === 'mode') {\n      mode = d.mode\n      if (hover) hover.style.display = 'none'\n      if (mode !== 'select') clearMarks()\n      document.documentElement.style.cursor = mode === 'select' ? 'crosshair' : ''\n    } else if (d.type === 'clear') {\n      clearMarks()\n    } else if (d.type === 'qa') {\n      var result\n      try { result = qa(d.options || {}) } catch (err) { result = { version: VERSION, error: String(err && err.message || err), issues: [], stats: {} } }\n      post({ type: 'qa-result', id: d.id, result: result })\n    } else if (d.type === 'locate') {\n      var el = null\n      try { el = d.selector ? document.querySelector(d.selector) : null } catch (err) { el = null }\n      if (!el) { post({ type: 'locate-miss', selector: d.selector }); return }\n      el.scrollIntoView({ block: 'center', behavior: 'smooth' })\n      var flash = box('rgb(220,38,38)', false)\n      setTimeout(function () { place(flash, el) }, 350)\n      setTimeout(function () { flash.remove() }, 2200)\n    }\n  })\n  post({ type: 'ready', title: document.title || '', url: location.href })\n})()\n\n\n\n\n"
+    const RUNTIME = "/* Deliver Studio · 页面内运行时（iframe 与无头浏览器共用）\n * - window.__deliverQA(options) → { version, stats, issues }\n * - 在 iframe 中：与父窗口用 postMessage 通信（选择 · Ask AI、定位、QA）\n * 纯浏览器脚本，无依赖；不访问父页面，只发送结构化数据。 */\n(function () {\n  'use strict'\n  if (window.__deliverRuntime) return\n  window.__deliverRuntime = true\n  var VERSION = 1\n  var TAG = '__deliverStudio'\n  var CJK = /[\\u3400-\\u9fff\\uf900-\\ufaff]/\n  var CJK_G = /[\\u3400-\\u9fff\\uf900-\\ufaff]/g\n\n  // ── 工具 ────────────────────────────────────────────\n  function cssEscape(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&') }\n  function cssPath(el) {\n    if (!el || el.nodeType !== 1) return ''\n    if (el.id && document.querySelectorAll('#' + cssEscape(el.id)).length === 1) return '#' + cssEscape(el.id)\n    var parts = []\n    var cur = el\n    while (cur && cur.nodeType === 1 && cur !== document.documentElement) {\n      if (cur.id && document.querySelectorAll('#' + cssEscape(cur.id)).length === 1) { parts.unshift('#' + cssEscape(cur.id)); break }\n      var name = cur.localName\n      var cls = Array.prototype.filter.call(cur.classList || [], function (c) { return !/^__ds/.test(c) && /^[a-zA-Z_-][\\w-]*$/.test(c) }).slice(0, 2)\n      var part = name + (cls.length ? '.' + cls.map(cssEscape).join('.') : '')\n      var parent = cur.parentElement\n      if (parent) {\n        var same = Array.prototype.filter.call(parent.children, function (c) { return c.localName === name })\n        if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')'\n      }\n      parts.unshift(part)\n      if (name === 'body') break\n      cur = parent\n    }\n    return parts.join(' > ')\n  }\n  function visible(el) {\n    var cs = getComputedStyle(el)\n    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) return false\n    var r = el.getBoundingClientRect()\n    return r.width > 0 && r.height > 0\n  }\n  function ownText(el) {\n    var s = ''\n    for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3) s += n.nodeValue\n    return s.replace(/\\s+/g, ' ').trim()\n  }\n  function clip(s, n) { s = String(s || '').replace(/\\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s }\n  function parseColor(c) {\n    var m = /rgba?\\(([^)]+)\\)/.exec(c || '')\n    if (!m) return null\n    var p = m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number)\n    return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }\n  }\n  function lum(c) {\n    function ch(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }\n    return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)\n  }\n  function blend(top, bottom) {\n    var a = top.a\n    return { r: top.r * a + bottom.r * (1 - a), g: top.g * a + bottom.g * (1 - a), b: top.b * a + bottom.b * (1 - a), a: 1 }\n  }\n  function effectiveBg(el) {\n    var layers = []\n    for (var cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) {\n      var cs = getComputedStyle(cur)\n      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null\n      var c = parseColor(cs.backgroundColor)\n      if (c && c.a > 0) { layers.push(c); if (c.a >= 1) break }\n    }\n    var base = { r: 255, g: 255, b: 255, a: 1 }\n    for (var i = layers.length - 1; i >= 0; i--) base = blend(layers[i], base)\n    return base\n  }\n  function hex(c) { return '#' + [c.r, c.g, c.b].map(function (v) { return ('0' + Math.round(v).toString(16)).slice(-2) }).join('') }\n\n  // ── QA ─────────────────────────────────────────────\n  var DEFAULT_BANNED = ['TODO', 'TBD', 'FIXME', '待补充', '此处替换', 'Lorem ipsum']\n  // 正文引用：中文「如/见/参见/详见/参考/据 图|表 N」；英文「see / in / cf. / refer to / according to Figure|Fig.|Table N」与「(Figure N)」「(see Table N)」\n  // 每处引用只匹配一次（同一位置的「(see …)」走括号分支，不会再被 see 分支重复匹配）\n  var REF_RES = [\n    /(?:如|见|参见|详见|参考|据)\\s*(图|表)\\s*([0-9]+)/g,\n    /(?:\\b(?:see|in|cf\\.?|refer\\s+to|according\\s+to)\\s+|\\(\\s*(?:see\\s+)?)(Figures?|Figs?\\.?|Tables?)\\s*([0-9]+)/gi,\n  ]\n  // 行内元素前面紧跟这些引导词时，它是引用（「见<a>图2</a>」「see <a>Fig. 2</a>」），不是图注\n  var REF_LEAD = /(?:如|见|参见|详见|参考|据|\\bsee|\\bin|\\bcf\\.?|\\brefer\\s+to|\\baccording\\s+to|\\(\\s*(?:see)?)\\s*$/i\n  function refKind(word) { return /^(表|tab)/i.test(word) ? '表' : '图' }\n  function textBefore(el) {\n    var s = ''\n    for (var n = el.previousSibling; n && s.length < 40; n = n.previousSibling) s = (n.textContent || '') + s\n    return s.slice(-40)\n  }\n\n  function qa(options) {\n    options = options || {}\n    var issues = []\n    var seq = 0\n    function add(cat, level, title, detail, el, fix, extra) {\n      var it = { id: 'q' + (++seq), cat: cat, level: level, title: title, detail: detail || '', selector: el ? cssPath(el) : '', fix: fix || '' }\n      if (extra) for (var k in extra) it[k] = extra[k]\n      issues.push(it)\n      return it\n    }\n    var body = document.body\n    if (!body) return { version: VERSION, stats: {}, issues: [] }\n    var all = Array.prototype.slice.call(body.querySelectorAll('*'), 0, 8000).filter(function (el) { return !(el.className && String(el.className).indexOf('__ds') === 0) && !el.closest('[data-deliver-overlay]') })\n    var textEls = all.filter(function (el) { return !/^(script|style|noscript|template|svg|path|defs)$/.test(el.localName) && ownText(el).length > 0 && visible(el) })\n\n    // 1) 编号：图 / 表 连续、正文引用存在\n    var capRe = /^\\s*(图|表|Figure|Fig\\.?|Table)\\s*([0-9]+)/i\n    var caps = { 图: [], 表: [] }\n    var capEls = []\n    var inlineRefs = []\n    all.forEach(function (el) {\n      if (!visible(el)) return\n      var t = (el.innerText || '').trim()\n      if (!t || t.length > 140) return\n      var m = capRe.exec(t)\n      if (!m) return\n      if (el.querySelector && Array.prototype.some.call(el.children, function (c) { return capRe.test((c.innerText || '').trim()) })) return\n      var kind = refKind(m[1])\n      // 行内引用不算图注，交给下面的引用检查（避免同一处既算图注又算引用）\n      if (getComputedStyle(el).display === 'inline' && REF_LEAD.test(textBefore(el))) { inlineRefs.push({ kind: kind, n: Number(m[2]), el: el, text: (el.parentElement && el.parentElement.innerText) || t }); return }\n      caps[kind].push({ n: Number(m[2]), el: el, text: t })\n      capEls.push(el)\n    })\n    ;['图', '表'].forEach(function (kind) {\n      // 角标「Fig. 3」与图注「Fig. 3 — …」相邻出现时只算一次\n      var list = caps[kind].filter(function (c, i, arr) { return !(i > 0 && arr[i - 1].n === c.n && (c.text.length <= 10 || arr[i - 1].text.length <= 10)) })\n      caps[kind] = list\n      var seen = {}\n      list.forEach(function (c, i) {\n        var expect = i === 0 ? 1 : list[i - 1].n + 1\n        if (seen[c.n]) add('numbering', 'must', kind + c.n + ' 重复编号', '「' + clip(c.text, 40) + '」与前面的' + kind + c.n + '重复', c.el, '按出现顺序重新编号')\n        else if (c.n !== expect) add('numbering', 'must', kind + '编号不连续：应为' + kind + expect + '，实际是' + kind + c.n, '「' + clip(c.text, 40) + '」', c.el, '按出现顺序从' + kind + '1 开始连续编号，并同步正文里的引用')\n        seen[c.n] = true\n      })\n    })\n    var refSeen = {}\n    function checkRef(kind, n, el, t) {\n      if (caps[kind].some(function (c) { return c.n === n }) || refSeen[kind + n]) return\n      refSeen[kind + n] = true\n      add('numbering', 'must', '正文引用了' + kind + n + '，但页面里没有' + kind + n, '「' + clip(t, 50) + '」', el, '核对引用编号，或补上对应的' + kind)\n    }\n    textEls.forEach(function (el) {\n      if (capEls.indexOf(el) >= 0) return\n      var t = ownText(el)\n      REF_RES.forEach(function (re) {\n        var m\n        re.lastIndex = 0\n        while ((m = re.exec(t))) checkRef(refKind(m[1]), Number(m[2]), el, t)\n      })\n    })\n    inlineRefs.forEach(function (r) { checkRef(r.kind, r.n, r.el, r.text) })\n\n    // 2) 文本：孤字、截断、横向溢出、超长行\n    var orphanCount = 0\n    var blockSel = /^(p|li|h[1-6]|td|th|figcaption|dd|dt|blockquote|div|span|a|label|caption)$/\n    textEls.forEach(function (el) {\n      if (orphanCount >= 40 || !blockSel.test(el.localName)) return\n      var cs = getComputedStyle(el)\n      if (cs.display === 'inline' || cs.whiteSpace === 'nowrap') return\n      var txt = (el.innerText || '').replace(/\\s+/g, '')\n      if (txt.length < 6) return\n      var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)\n      var nodes = []\n      for (var n = walker.nextNode(); n; n = walker.nextNode()) if (n.nodeValue.trim()) nodes.push(n)\n      if (!nodes.length) return\n      var range = document.createRange()\n      var lastTop = null, firstTop = null, count = 0, done = false\n      try {\n        range.setStart(nodes[0], 0); range.setEnd(nodes[0], 1)\n        var fr = range.getClientRects()[0]; firstTop = fr ? fr.top : null\n        for (var i = nodes.length - 1; i >= 0 && !done; i--) {\n          var v = nodes[i].nodeValue\n          for (var j = v.length - 1; j >= 0; j--) {\n            if (/\\s/.test(v[j])) continue\n            range.setStart(nodes[i], j); range.setEnd(nodes[i], j + 1)\n            var r = range.getClientRects()[0]\n            if (!r) continue\n            if (lastTop === null) { lastTop = r.top; count = 1; continue }\n            if (Math.abs(r.top - lastTop) < Math.max(2, r.height * 0.4)) { count++; if (count > 3) { done = true; break } } else { done = true; break }\n          }\n        }\n      } catch (e) { return }\n      if (lastTop === null || firstTop === null || count > 2 || Math.abs(lastTop - firstTop) < 2) return\n      orphanCount++\n      var tail = txt.slice(-count)\n      add('text', /^h[1-6]$/.test(el.localName) ? 'must' : 'must', (/^h[1-6]$/.test(el.localName) ? '标题' : '段落') + '末行只剩「' + tail + '」', '「…' + clip(txt.slice(-24), 26) + '」最后一行只有 ' + count + ' 个字', el, '精简几个字、调整字号/字距，或给该元素加 text-wrap: pretty')\n    })\n    var docW = document.documentElement.scrollWidth, winW = window.innerWidth\n    if (docW > winW + 2) {\n      var offenders = all.filter(function (el) { var r = el.getBoundingClientRect(); return r.right > winW + 2 && r.width > 0 && visible(el) })\n      var outer = offenders.filter(function (el) { return offenders.indexOf(el.parentElement) < 0 })\n      var canvas = outer.find(function (el) { return (el.parentElement === body || el === body) && el.getBoundingClientRect().width > winW && /px$/.test(getComputedStyle(el).width) && (el.style.width || /^\\d/.test(getComputedStyle(el).minWidth) || el.getBoundingClientRect().width >= winW * 1.05) })\n      if (canvas) add('layout', 'hint', '固定宽度画布 ' + Math.round(canvas.getBoundingClientRect().width) + 'px', '页面按固定宽度设计（海报/长图），当前视口 ' + winW + 'px 需要横向滚动', canvas, '确认这是预期的画布尺寸；导出 PDF 时会按纸张缩放')\n      else add('text', 'must', '页面横向溢出 ' + (docW - winW) + 'px', '视口宽 ' + winW + 'px，内容宽 ' + docW + 'px', outer[0] || null, '检查固定宽度、长单词和图片的 max-width')\n    }\n    var clipCount = 0\n    all.forEach(function (el) {\n      if (clipCount >= 15 || !visible(el)) return\n      var cs = getComputedStyle(el)\n      var clipX = cs.overflowX === 'hidden' || cs.overflowX === 'clip'\n      var clipY = cs.overflowY === 'hidden' || cs.overflowY === 'clip'\n      var ellipsis = cs.textOverflow === 'ellipsis' || Number(cs.webkitLineClamp) > 0\n      if (!clipX && !clipY && !ellipsis) return\n      // 只看自身直接承载文字的元素（容器里装饰性大字溢出不算）\n      if (!ownText(el)) return\n      if ((clipX || ellipsis) && el.scrollWidth > el.clientWidth + 2 || (clipY || ellipsis) && el.scrollHeight > el.clientHeight + 3) {\n        clipCount++\n        add('text', 'must', '文字被截断', '「' + clip(el.innerText, 40) + '」容器 ' + el.clientWidth + '×' + el.clientHeight + '，内容 ' + el.scrollWidth + '×' + el.scrollHeight, el, '放宽容器或精简文字，避免 overflow:hidden 吞字')\n      }\n    })\n    var longCount = 0\n    textEls.forEach(function (el) {\n      if (longCount >= 5 || el.localName !== 'p') return\n      var fs = parseFloat(getComputedStyle(el).fontSize) || 16\n      var w = el.getBoundingClientRect().width\n      if (w / fs > 48 && (el.innerText || '').length > 120) { longCount++; add('text', 'hint', '行宽过长（约 ' + Math.round(w / fs) + ' 字/行）', '正文每行超过 48 个字，阅读吃力', el, '给正文容器设置 max-width（约 36–42em）') }\n    })\n\n    // 3) 版式：A4/幻灯片页面的留白与溢出\n    var pages = all.filter(function (el) {\n      if (!visible(el)) return false\n      var r = el.getBoundingClientRect()\n      if (r.width < 280 || r.height < 300) return false\n      var ratio = r.height / r.width\n      var cs = getComputedStyle(el)\n      var named = /(^|[\\s_-])(page|sheet|slide|a4|paper|poster)([\\s_-]|$)/i.test(el.className && typeof el.className === 'string' ? el.className : '')\n      var fixed = cs.overflow === 'hidden' || cs.overflowY === 'hidden' || cs.overflow === 'clip'\n      var breaks = cs.breakAfter === 'page' || cs.pageBreakAfter === 'always' || cs.breakBefore === 'page' || cs.pageBreakBefore === 'always'\n      var a4 = Math.abs(ratio - 1.4142) < 0.06\n      var slide = Math.abs(ratio - 0.5625) < 0.03 && named\n      return (named && (fixed || breaks || a4)) || (a4 && r.width >= 700 && r.width <= 900) || slide || (breaks && r.height > 400)\n    })\n    pages = pages.filter(function (p) { return !pages.some(function (q) { return q !== p && q.contains(p) }) })\n    pages.forEach(function (p, i) {\n      var pr = p.getBoundingClientRect()\n      var cs = getComputedStyle(p)\n      var padT = parseFloat(cs.paddingTop) || 0, padB = parseFloat(cs.paddingBottom) || 0\n      var bottom = pr.top + padT, overflow = 0\n      Array.prototype.forEach.call(p.querySelectorAll('*'), function (d) {\n        if (!visible(d)) return\n        var hasContent = ownText(d) || /^(img|svg|canvas|video|table)$/.test(d.localName)\n        if (!hasContent) return\n        var r = d.getBoundingClientRect()\n        if (r.bottom > bottom) bottom = r.bottom\n        if (r.bottom > pr.bottom + 2) overflow = Math.max(overflow, r.bottom - pr.bottom)\n      })\n      var usable = pr.height - padT - padB\n      var fill = usable > 0 ? (bottom - pr.top - padT) / usable : 1\n      var label = '第' + (i + 1) + '页'\n      if (overflow > 0) add('layout', 'must', label + '内容溢出页面 ' + Math.round(overflow) + 'px', '导出 PDF 时会被裁掉或挤到下一页', p, '精简内容、缩小图表或拆页', { page: i + 1 })\n      else if (fill < 0.65) add('layout', fill < 0.5 ? 'must' : 'hint', label + '留白 ' + Math.round((1 - fill) * 100) + '%', '内容只占可用高度的 ' + Math.round(fill * 100) + '%', p, '补充内容、放大图表，或与相邻页合并', { page: i + 1 })\n      var heads = p.querySelectorAll('h1,h2,h3,h4')\n      if (heads.length) {\n        var last = heads[heads.length - 1], lr = last.getBoundingClientRect()\n        if (lr.top > pr.bottom - usable * 0.15 && lr.bottom <= pr.bottom && Math.abs(lr.bottom - bottom) < 4) add('layout', 'hint', label + '标题落在页底', '「' + clip(last.innerText, 30) + '」后面没有正文', last, '把标题移到下一页或在前面压缩内容', { page: i + 1 })\n      }\n    })\n\n    // 4) 视觉：对比度、字体与字号种类\n    var pairs = {}\n    textEls.forEach(function (el) {\n      var cs = getComputedStyle(el)\n      var fg = parseColor(cs.color)\n      if (!fg) return\n      var bg = effectiveBg(el)\n      if (!bg) return\n      var f = fg.a < 1 ? blend(fg, bg) : fg\n      var l1 = lum(f), l2 = lum(bg)\n      var ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05)\n      var size = parseFloat(cs.fontSize) || 16\n      var bold = Number(cs.fontWeight) >= 700\n      var large = size >= 24 || (bold && size >= 18.66)\n      var need = large ? 3 : 4.5\n      if (ratio >= need) return\n      var key = hex(f) + '/' + hex(bg) + '/' + (large ? 'L' : 'N')\n      if (!pairs[key]) pairs[key] = { ratio: ratio, need: need, el: el, n: 0, fg: hex(f), bg: hex(bg) }\n      pairs[key].n++\n    })\n    Object.keys(pairs).slice(0, 15).forEach(function (k) {\n      var p = pairs[k]\n      add('visual', p.ratio < 3 ? 'must' : 'hint', '对比度不足 ' + p.ratio.toFixed(2) + ':1（需 ≥' + p.need + '）', '文字 ' + p.fg + ' 在背景 ' + p.bg + ' 上，共 ' + p.n + ' 处，如「' + clip(p.el.innerText, 24) + '」', p.el, '加深文字或调浅背景，使对比度达到 WCAG AA')\n    })\n    var fams = {}, sizes = {}\n    textEls.forEach(function (el) {\n      var cs = getComputedStyle(el)\n      var fam = (cs.fontFamily || '').split(',')[0].replace(/[\"']/g, '').trim().toLowerCase()\n      fams[fam] = (fams[fam] || 0) + 1\n      sizes[Math.round(parseFloat(cs.fontSize))] = (sizes[Math.round(parseFloat(cs.fontSize))] || 0) + 1\n    })\n    var famList = Object.keys(fams)\n    if (famList.length > 3) add('visual', 'hint', '字体种类过多（' + famList.length + ' 种）', famList.slice(0, 6).join('、'), null, '正文、标题、数字各用一种字体即可')\n    var sizeList = Object.keys(sizes).map(Number).sort(function (a, b) { return a - b })\n    if (sizeList.length > 8) add('visual', 'hint', '字号种类过多（' + sizeList.length + ' 种）', sizeList.join(' / ') + ' px', null, '收敛到 5–6 级字号')\n\n    // 5) 资源：图片失败、拉伸、分辨率；页内锚点\n    Array.prototype.forEach.call(document.images, function (img) {\n      if (!visible(img)) return\n      if (img.complete && img.naturalWidth === 0) { add('asset', 'must', '图片加载失败', img.getAttribute('src') ? clip(img.getAttribute('src'), 60) : '(无 src)', img, '检查图片路径；导出 PDF 前必须能加载'); return }\n      if (!img.naturalWidth) return\n      var r = img.getBoundingClientRect()\n      var fit = getComputedStyle(img).objectFit\n      var dr = r.width / r.height, nr = img.naturalWidth / img.naturalHeight\n      if ((fit === 'fill' || !fit) && Math.abs(dr - nr) / nr > 0.05) add('asset', 'must', '图片被拉伸 ' + Math.round(Math.abs(dr - nr) / nr * 100) + '%', '显示 ' + Math.round(r.width) + '×' + Math.round(r.height) + '，原图 ' + img.naturalWidth + '×' + img.naturalHeight, img, '只固定宽或高，另一边用 auto，或用 object-fit: contain')\n      else if (img.naturalWidth < r.width * 1.5 && r.width > 240) add('asset', 'hint', '图片分辨率偏低', '显示宽 ' + Math.round(r.width) + 'px，原图仅 ' + img.naturalWidth + 'px，打印会发糊', img, '换用至少 2 倍尺寸的图片')\n    })\n    var deadSeen = {}\n    Array.prototype.forEach.call(document.querySelectorAll('a[href^=\"#\"]'), function (a) {\n      var id = decodeURIComponent(a.getAttribute('href').slice(1))\n      if (!id || deadSeen[id]) return\n      if (!document.getElementById(id) && !document.getElementsByName(id).length) { deadSeen[id] = true; add('asset', 'hint', '页内链接指向不存在的位置 #' + clip(id, 30), '「' + clip(a.innerText, 30) + '」', a, '核对目录锚点与标题 id') }\n    })\n\n    // 6) 交付规范：禁用字样、字数\n    var banned = (options.bannedWords && options.bannedWords.length ? options.bannedWords : DEFAULT_BANNED).filter(Boolean)\n    var bannedHit = {}\n    textEls.forEach(function (el) {\n      var t = ownText(el)\n      banned.forEach(function (w) {\n        if (!bannedHit[w] && t.indexOf(w) >= 0) { bannedHit[w] = true; add('delivery', 'must', '出现禁用字样「' + w + '」', '「' + clip(t, 50) + '」', el, '交付稿不应出现过程性字样，删掉这一段') }\n      })\n    })\n    var text = body.innerText || ''\n    var cjk = (text.match(CJK_G) || []).length\n    var words = (text.replace(CJK_G, ' ').match(/[A-Za-z][A-Za-z'’-]*/g) || []).length\n    var stats = {\n      cjk: cjk, words: words, chars: cjk + words,\n      figures: caps['图'].length, tables: caps['表'].length, images: document.images.length,\n      pages: pages.length, fonts: famList.length, fontSizes: sizeList.length,\n      viewport: winW + '×' + window.innerHeight, title: document.title || '',\n    }\n    if (options.targetChars > 0) {\n      var dev = (stats.chars - options.targetChars) / options.targetChars\n      if (Math.abs(dev) > 0.1) add('delivery', 'hint', '字数 ' + stats.chars + '，与目标 ' + options.targetChars + ' 相差 ' + Math.round(dev * 100) + '%', '中文字 ' + cjk + '、英文词 ' + words, null, dev > 0 ? '精简内容' : '补充内容')\n    }\n    var must = issues.filter(function (i) { return i.level === 'must' }).length\n    return { version: VERSION, stats: stats, issues: issues, must: must, hint: issues.length - must }\n  }\n  window.__deliverQA = qa\n\n  // ── 批注目标查找（与导出 HTML 的 viewer.js 规则一致）──────\n  function normText(s) { return String(s || '').replace(/\\s+/g, ' ').trim().slice(0, 40) }\n  function findTarget(t) {\n    if (!t) return null\n    var el = null\n    try { el = t.selector ? document.querySelector(t.selector) : null } catch (e) { el = null }\n    var fp = normText(t.text)\n    if (el && (!fp || normText(el.innerText || el.textContent) === fp)) return el\n    if (!fp || !t.tag) return el && !fp ? el : null\n    var list = document.getElementsByTagName(t.tag)\n    for (var i = 0; i < list.length && i < 4000; i++) if (normText(list[i].innerText || list[i].textContent) === fp && !list[i].closest('[data-deliver-overlay]')) return list[i]\n    return null\n  }\n  window.__deliverFindTarget = findTarget\n\n  // ── iframe 交互：批注、定位、页内导航 ──────────────────\n  if (window.parent === window) return\n  var mode = 'browse'\n  var hover = null\n  var marks = []\n  var scale = 1\n  var SEL = '109,94,252'\n  function post(msg) { msg[TAG] = true; try { window.parent.postMessage(msg, '*') } catch (e) {} }\n  function box(rgb, dashed) {\n    var d = document.createElement('div')\n    d.setAttribute('data-deliver-overlay', '')\n    d.className = '__ds-box'\n    d.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483645;box-sizing:border-box;border:' + Math.max(1.5, 2 / scale) + 'px ' + (dashed ? 'dashed' : 'solid') + ' rgb(' + rgb + ');background:rgba(' + rgb + ',0.07);border-radius:3px'\n    document.documentElement.appendChild(d)\n    return d\n  }\n  function place(d, el) {\n    var r = el.getBoundingClientRect()\n    d.style.left = (r.left + window.scrollX) + 'px'; d.style.top = (r.top + window.scrollY) + 'px'\n    d.style.width = r.width + 'px'; d.style.height = r.height + 'px'; d.style.display = 'block'\n  }\n  function label(d, text) {\n    var t = d.firstChild || d.appendChild(document.createElement('span'))\n    var fs = Math.round(11 / scale)\n    t.style.cssText = 'position:absolute;left:-2px;top:' + (-fs - 9) + 'px;font:600 ' + fs + 'px/' + (fs + 6) + 'px system-ui,sans-serif;color:#fff;background:rgb(' + SEL + ');padding:0 ' + Math.round(6 / scale) + 'px;border-radius:' + fs + 'px;white-space:nowrap'\n    t.textContent = text\n  }\n  function vrect(el) { var r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) } }\n  function describe(el) {\n    var cs = getComputedStyle(el)\n    var r = el.getBoundingClientRect()\n    var html = el.outerHTML\n    return {\n      selector: cssPath(el), tag: el.localName, route: location.hash || '',\n      text: clip(el.innerText || el.textContent, 200),\n      html: html.length > 600 ? html.slice(0, 599) + '…' : html,\n      rect: { x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) },\n      vrect: vrect(el),\n      styles: {\n        fontSize: cs.fontSize, fontWeight: cs.fontWeight, fontFamily: cs.fontFamily.split(',')[0].replace(/[\"']/g, ''), lineHeight: cs.lineHeight,\n        color: cs.color, background: cs.backgroundColor, margin: cs.margin, padding: cs.padding, borderRadius: cs.borderRadius, textAlign: cs.textAlign,\n      },\n    }\n  }\n  function clearMarks() { marks.forEach(function (m) { m.box.remove() }); marks = [] }\n  function renumber() { marks.forEach(function (m, i) { label(m.box, String(i + 1)) }) }\n  function sendSelRect() { if (marks.length) post({ type: 'sel-rect', vrect: vrect(marks[marks.length - 1].el) }) }\n\n  // 批注标记层\n  var notes = []\n  var pinLayer = null\n  var pinOutlines = []\n  var focusId = null\n  function pinHost() {\n    if (pinLayer && pinLayer.isConnected) return pinLayer\n    pinLayer = document.createElement('div')\n    pinLayer.setAttribute('data-deliver-overlay', '')\n    pinLayer.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:2147483646'\n    document.documentElement.appendChild(pinLayer)\n    return pinLayer\n  }\n  function onColor(hex) {\n    var c = /^#?([0-9a-f]{6})$/i.exec(hex || '')\n    if (!c) return '#fff'\n    var n = parseInt(c[1], 16)\n    return lum({ r: n >> 16, g: (n >> 8) & 255, b: n & 255 }) > 0.42 ? '#1c1917' : '#fff'\n  }\n  function clearOutlines() { pinOutlines.forEach(function (o) { o.remove() }); pinOutlines = [] }\n  function outline(note) {\n    clearOutlines()\n    ;(note.targets || []).forEach(function (t) {\n      var el = findTarget(t)\n      if (!el) return\n      var o = document.createElement('div')\n      o.setAttribute('data-deliver-overlay', '')\n      o.style.cssText = 'position:absolute;pointer-events:none;z-index:2147483644;box-sizing:border-box;border-radius:3px;border:' + Math.max(1.5, 2 / scale) + 'px solid ' + note.color + ';background:' + note.color + '14'\n      document.documentElement.appendChild(o)\n      place(o, el)\n      pinOutlines.push(o)\n    })\n  }\n  function renderPins() {\n    var host = pinHost()\n    host.textContent = ''\n    var fs = Math.round(11 / scale)\n    var placed = 0\n    notes.forEach(function (n) {\n      var el = findTarget(n.targets && n.targets[0])\n      if (!el || !visible(el)) return\n      var r = el.getBoundingClientRect()\n      var right = r.right\n      // 标记贴在文字末尾的右上角（与 viewer.js 一致）\n      try { var rg = document.createRange(); rg.selectNodeContents(el); var tr = rg.getBoundingClientRect(); if (tr.width > 0 && tr.right < right) right = Math.max(r.left + 24, tr.right + 6) } catch (e) {}\n      var p = document.createElement('button')\n      p.type = 'button'\n      p.setAttribute('data-note', n.id)\n      p.title = n.comment || ''\n      p.textContent = n.label\n      var focused = n.id === focusId\n      p.style.cssText = 'all:initial;position:absolute;box-sizing:border-box;cursor:pointer;font:700 ' + fs + 'px/' + (fs + 8) + 'px system-ui,-apple-system,sans-serif;min-width:' + (fs + 8) + 'px;height:' + (fs + 8) + 'px;padding:0 ' + Math.round(6 / scale) + 'px;border-radius:' + (fs + 8) + 'px ' + (fs + 8) + 'px ' + (fs + 8) + 'px 2px;text-align:center;white-space:nowrap;max-width:' + Math.round(160 / scale) + 'px;overflow:hidden;text-overflow:ellipsis;background:' + n.color + ';color:' + onColor(n.color) + ';box-shadow:0 0 0 ' + Math.max(1.5, 2 / scale) + 'px #fff,0 2px 6px rgba(0,0,0,.25)' + (focused ? ',0 0 0 ' + Math.round(5 / scale) + 'px ' + n.color + '66' : '')\n      p.style.left = Math.max(0, right + window.scrollX - fs - 4) + 'px'\n      p.style.top = Math.max(0, r.top + window.scrollY - fs - 4) + 'px'\n      p.addEventListener('mouseenter', function () { outline(n) })\n      p.addEventListener('mouseleave', clearOutlines)\n      p.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); post({ type: 'pin', id: n.id }) }, true)\n      host.appendChild(p)\n      placed++\n    })\n    post({ type: 'pins', shown: placed })\n  }\n  var pinTimer = 0\n  function schedulePins() { if (!notes.length && !(pinLayer && pinLayer.firstChild)) return; clearTimeout(pinTimer); pinTimer = setTimeout(function () { renderPins(); marks.forEach(function (m) { place(m.box, m.el) }) }, 120) }\n  if (window.MutationObserver) new MutationObserver(function (list) {\n    for (var i = 0; i < list.length; i++) { var t = list[i].target; if (!(t.closest && t.closest('[data-deliver-overlay]')) && t !== document.documentElement) { schedulePins(); return } }\n  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true })\n\n  function isOverlay(el) { return !el || el === document.documentElement || (el.closest && el.closest('[data-deliver-overlay]')) }\n  document.addEventListener('mousemove', function (e) {\n    if (mode !== 'select') return\n    var el = e.target\n    if (isOverlay(el) || el === document.body) { if (hover) hover.style.display = 'none'; return }\n    if (!hover) hover = box(SEL, true)\n    place(hover, el)\n  }, true)\n  // 批注模式下吞掉页面自身的按下/点击，避免误触发页面逻辑\n  ;['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'dblclick', 'submit'].forEach(function (type) {\n    document.addEventListener(type, function (e) { if (mode === 'select' && !isOverlay(e.target)) { e.preventDefault(); e.stopPropagation() } }, true)\n  })\n  document.addEventListener('click', function (e) {\n    if (mode !== 'select') return\n    var el = e.target\n    if (isOverlay(el)) return\n    e.preventDefault(); e.stopPropagation()\n    var existing = marks.findIndex(function (m) { return m.el === el })\n    if (existing >= 0) { marks[existing].box.remove(); marks.splice(existing, 1); renumber(); post({ type: 'unselect', selector: cssPath(el) }); sendSelRect(); return }\n    if (!e.shiftKey) clearMarks()\n    var b = box(SEL, false)\n    place(b, el)\n    marks.push({ el: el, box: b })\n    renumber()\n    post({ type: 'select', additive: !!e.shiftKey, item: describe(el) })\n  }, true)\n  // 浏览模式：页内锚点交给页面自己处理；站外链接和相对路径的其它文件交给工作台打开\n  document.addEventListener('click', function (e) {\n    if (mode !== 'browse' || e.defaultPrevented) return\n    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null\n    if (!a || isOverlay(a)) return\n    var href = (a.getAttribute('href') || '').trim()\n    if (!href || href[0] === '#' || /^javascript:/i.test(href)) return\n    e.preventDefault()\n    if (/^https?:\\/\\//i.test(href)) post({ type: 'open-url', href: href })\n    else if (!/^[a-z][a-z\\d+.-]*:/i.test(href)) post({ type: 'open-file', href: href })\n  }, false)\n  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') post({ type: 'esc' }); else if (e.key === 'Shift' && mode === 'select' && !e.repeat) post({ type: 'shift', down: true }) }, true)\n  document.addEventListener('keyup', function (e) { if (e.key === 'Shift') post({ type: 'shift', down: false }) }, true)\n  window.addEventListener('blur', function () { post({ type: 'shift', down: false }) })\n  var rafPending = false\n  function onScroll() {\n    if (rafPending) return\n    rafPending = true\n    requestAnimationFrame(function () { rafPending = false; marks.forEach(function (m) { place(m.box, m.el) }); sendSelRect(); if (pinLayer && pinLayer.firstChild) renderPins(); if (pinOutlines.length) clearOutlines() })\n  }\n  window.addEventListener('scroll', onScroll, true)\n  window.addEventListener('resize', onScroll)\n  window.addEventListener('hashchange', function () { post({ type: 'route', hash: location.hash }); schedulePins() })\n  window.addEventListener('message', function (e) {\n    var d = e.data\n    if (!d || d[TAG] !== true || e.source !== window.parent) return\n    if (d.type === 'mode') {\n      mode = d.mode\n      if (hover) hover.style.display = 'none'\n      if (mode !== 'select') clearMarks()\n      document.documentElement.style.cursor = mode === 'select' ? 'crosshair' : ''\n    } else if (d.type === 'scale') {\n      scale = Math.max(0.25, Math.min(1, Number(d.scale) || 1)); renumber(); if (notes.length) renderPins()\n    } else if (d.type === 'clear') {\n      clearMarks()\n    } else if (d.type === 'notes') {\n      notes = d.notes || []; focusId = d.focus || null; renderPins()\n    } else if (d.type === 'route') {\n      if (typeof d.hash === 'string' && d.hash !== location.hash) location.hash = d.hash\n    } else if (d.type === 'qa') {\n      whenLaidOut(function () {\n        var result\n        try { result = qa(d.options || {}) } catch (err) { result = { version: VERSION, error: String(err && err.message || err), issues: [], stats: {} } }\n        post({ type: 'qa-result', id: d.id, result: result })\n      })\n    } else if (d.type === 'locate') {\n      locate(d, false)\n    }\n  })\n  function locate(d, retried) {\n    var el = null\n    if (d.target) el = findTarget(d.target)\n    else { try { el = d.selector ? document.querySelector(d.selector) : null } catch (err) { el = null } }\n    // 目标在 SPA 的其它路由上：先切过去再找一次\n    if (!el && !retried && d.target && typeof d.target.route === 'string' && d.target.route !== location.hash) {\n      location.hash = d.target.route\n      setTimeout(function () { locate(d, true) }, 500)\n      return\n    }\n    if (!el) { post({ type: 'locate-miss', selector: d.selector || (d.target && d.target.selector) }); return }\n    el.scrollIntoView({ block: 'center', behavior: 'smooth' })\n    var flash = box('220,38,38', false)\n    setTimeout(function () { place(flash, el) }, 350)\n    setTimeout(function () { flash.remove() }, 2200)\n  }\n  // 页面加载完且完成首次布局后才算就绪：布局前 innerText 会退化成 textContent、尺寸全为 0，QA 结果不可信\n  function whenLaidOut(fn) {\n    function go() { requestAnimationFrame(function () { requestAnimationFrame(function () { if (window.innerWidth > 0) fn(); else setTimeout(go, 50) }) }) }\n    if (document.readyState === 'complete') go()\n    else window.addEventListener('load', go, { once: true })\n  }\n  whenLaidOut(function () { post({ type: 'ready', title: document.title || '', url: location.href, hash: location.hash }) })\n})()\n"
     const BODY_ID = 'dsh-deliver-studio/workbench'
     const ROW_KEY = 'dsh-deliver-studio#deliver-studio'
     const BRIDGE = '/api/dsh-deliver-studio'
@@ -16,39 +16,60 @@ window.__ModuleLoader__.load({
       { id: 'desktop', w: 1440, h: 900 }, { id: 'laptop', w: 1280, h: 800 }, { id: 'tablet', w: 768, h: 1024 },
       { id: 'mobile', w: 390, h: 844 }, { id: 'a4', w: 794, h: 1123 },
     ]
+    const COLORS = ['#e5484d', '#f76b15', '#ffc53d', '#30a46c', '#0d74ce', '#8e4ec6']
+    const DOCKS = ['bottom', 'top', 'left', 'right', 'float']
+    const CATS = ['visual', 'text', 'layout', 'numbering', 'asset', 'delivery']
     const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
 
     const zh = {
-      title: '交付工作台', vp_desktop: '桌面 1440', vp_laptop: '笔记本 1280', vp_tablet: '平板 768', vp_mobile: '手机 390', vp_a4: 'A4 794',
-      browse: '浏览', select: '选择 · Ask AI', qa: 'QA 检查', qaRunning: '检查中…', export: '导出 PDF', exporting: '导出中…', zoom: '缩放 {n}%',
-      loading: '正在渲染交付物…', failed: '无法渲染这份 HTML：{e}', assets: '已打包 {n} 个本地资源',
-      selected: '已选 {n} 个元素', pickHint: '在页面上点击元素；按住 Shift 可多选，再次点击取消', selector: '选择器', text: '文字', styles: '样式',
-      comment: '修改意见', commentPh: '例如：标题再精简，改成一行', addNote: '加入批注', tray: '批注托盘', trayEmpty: '还没有批注。切到「选择 · Ask AI」，点页面元素写意见。',
-      sendAll: '一起发给 Agent（{n} 条）', sent: '已放进输入框，确认后发送', clearAll: '清空', remove: '删除',
-      qaTitle: '交付 QA', qaEmpty: '没有发现问题', qaStats: '中文 {cjk} 字 · 英文 {words} 词 · 图 {fig} · 表 {tab} · {pages} 页',
-      must: '必改', hint: '建议', locate: '定位', toAgent: '发给 Agent 修', ignore: '忽略', allToAgent: '把全部问题发给 Agent',
+      title: '交付工作台', vp_desktop: '桌面', vp_laptop: '笔记本', vp_tablet: '平板', vp_mobile: '手机', vp_a4: 'A4',
+      viewport: '视口', browse: '浏览', annotate: '批注', browseTip: '浏览：页面可正常点击和切换', annotateTip: '批注：点选元素写意见 · Shift 多选 · Esc 退出',
+      qa: 'QA', qaTip: '交付 QA', exportBtn: '导出', exportPdf: '导出 PDF', exportHtml: '导出带批注的 HTML', exporting: '导出中…', panel: '面板', panelTip: '显示 / 收起面板',
+      tab_notes: '批注', tab_qa: 'QA', tab_el: '元素', dockMenu: '面板位置', hidePanel: '收起',
+      dock_bottom: '停靠底部', dock_top: '停靠顶部', dock_left: '停靠左侧', dock_right: '停靠右侧', dock_float: '浮动', dragHint: '拖到边缘停靠，放在中间浮动',
+      loading: '正在渲染…', failed: '无法渲染：{e}',
+      commentPh: '写修改意见', multiHint: 'Shift 多选', renameShort: '改名', add: '添加', cancel: '取消', nickPh: '昵称，可留空', nick: '昵称', nickEdit: '修改昵称', more: '+{n}',
+      notesEmpty: '还没有批注', notesEmptyHint: '切到「批注」，点选页面元素即可添加', startAnnotate: '开始批注',
+      sendAll: '发给 Agent', sent: '已放进输入框', copied: '已复制到剪贴板', clear: '清空', clearConfirm: '确认清空',
+      locate: '定位', remove: '删除', reply: '回复', replyPh: '写回复', save: '保存', rename: '双击改名', editComment: '双击编辑',
+      qaNotRun: '尚未检查', qaStart: '开始检查', qaRerun: '重新检查', qaRunning: '检查中…', qaEmpty: '未发现问题', qaError: '检查失败：{e}',
+      mustOnly: '只看必改', all: '全部', allToAgent: '全部发给 Agent', toNote: '加入批注', ignore: '忽略', ignored: '已忽略 {n} 条', restore: '恢复',
+      must: '必改', hint: '建议', mustN: '必改 {n}', hintN: '建议 {n}',
       cat_numbering: '编号', cat_layout: '版式', cat_text: '文本', cat_visual: '视觉', cat_asset: '资源', cat_delivery: '交付规范',
-      confirmTitle: '导出前 QA 发现 {n} 处必改', confirmBody: '建议先修复再导出；也可以确认后直接导出。', viewIssues: '查看问题', exportAnyway: '仍然导出', cancel: '取消',
-      exported: '已导出 {name}（{pages} 页）', openPdf: '打开 PDF', exportFail: '导出失败：{e}',
+      catd_numbering: '图表编号与引用', catd_layout: '溢出、留白、分页', catd_text: '孤字、截断、行宽', catd_visual: '对比度、字体字号', catd_asset: '图片、锚点', catd_delivery: '禁用字样、字数',
+      stats: '{cjk} 字 · {words} 词 · 图 {fig} · 表 {tab}', statsPages: ' · {pages} 页',
+      elEmpty: '未选择元素', elHint: '批注模式下点选元素后显示样式', selector: '选择器', text: '文字', font: '字体', color: '颜色', size: '尺寸', padding: '内边距',
+      confirmTitle: '有 {n} 处必改', exportAnyway: '仍然导出', viewIssues: '查看', exported: '已导出 {name} · {pages} 页', open: '打开', exportFail: '导出失败：{e}',
+      htmlExported: '已导出 {name} · {n} 条批注', locateMiss: '页面上找不到这个元素', fileOpened: '已在预览中打开 {name}',
       msgHead: '请按编号逐条修改交付物 {file}，每条改完回执编号；只改列出的元素，不要重排其它部分：', msgQaHead: '交付 QA 发现以下问题，请按编号逐条修复 {file}，改完回执编号：',
-      summary: 'HTML 交付物：视口切换、选择·Ask AI、QA、导出 PDF', sBanned: '禁用字样（每行一个）', sTarget: '目标字数（0 = 只统计）', sViewport: '默认视口', sQaBefore: '导出前强制 QA', sBrowser: '浏览器路径（Edge / Chrome / Chromium / Brave，留空自动查找）', save: '保存', saved: '已保存', browserOk: '已找到：{name}', browserMissing: '未找到 Chromium 内核浏览器', browserMissingHint: '请安装 Edge / Chrome / Chromium / Brave 中的一个，或在上方填写浏览器可执行文件的完整路径。',
+      msgReply: '回复', msgViewport: '（视口 {w}px）', anon: '用户{n}',
+      summary: 'HTML 交付物：视口预览、批注、QA、导出 PDF / 带批注 HTML', sBanned: '禁用字样（每行一个）', sTarget: '目标字数（0 = 只统计）', sViewport: '默认视口', sQaBefore: '导出前强制 QA', sBrowser: '浏览器路径（Edge / Chrome / Chromium / Brave，留空自动查找）', saved: '已保存', browserOk: '已找到：{name}', browserMissing: '未找到 Chromium 内核浏览器', browserMissingHint: '请安装 Edge / Chrome / Chromium / Brave 中的一个，或在上方填写浏览器可执行文件的完整路径。',
     }
     const en = {
-      title: 'Deliver Studio', vp_desktop: 'Desktop 1440', vp_laptop: 'Laptop 1280', vp_tablet: 'Tablet 768', vp_mobile: 'Mobile 390', vp_a4: 'A4 794',
-      browse: 'Browse', select: 'Select · Ask AI', qa: 'QA', qaRunning: 'Checking…', export: 'Export PDF', exporting: 'Exporting…', zoom: 'Zoom {n}%',
-      loading: 'Rendering…', failed: 'Could not render this HTML: {e}', assets: '{n} local assets packed',
-      selected: '{n} selected', pickHint: 'Click elements; Shift for multi-select, click again to drop', selector: 'Selector', text: 'Text', styles: 'Styles',
-      comment: 'Comment', commentPh: 'e.g. shorten the title to one line', addNote: 'Add note', tray: 'Notes', trayEmpty: 'No notes yet. Switch to Select · Ask AI and click an element.',
-      sendAll: 'Send to agent ({n})', sent: 'Placed in the composer — review and send', clearAll: 'Clear', remove: 'Remove',
-      qaTitle: 'Delivery QA', qaEmpty: 'No issues found', qaStats: '{cjk} CJK chars · {words} words · {fig} figures · {tab} tables · {pages} pages',
-      must: 'Must', hint: 'Hint', locate: 'Locate', toAgent: 'Ask agent', ignore: 'Ignore', allToAgent: 'Send all issues to agent',
-      cat_numbering: 'Numbering', cat_layout: 'Layout', cat_text: 'Text', cat_visual: 'Visual', cat_asset: 'Assets', cat_delivery: 'Delivery rules',
-      confirmTitle: 'QA found {n} must-fix issues', confirmBody: 'Fix them first, or export anyway.', viewIssues: 'View issues', exportAnyway: 'Export anyway', cancel: 'Cancel',
-      exported: 'Exported {name} ({pages} pages)', openPdf: 'Open PDF', exportFail: 'Export failed: {e}',
+      title: 'Deliver Studio', vp_desktop: 'Desktop', vp_laptop: 'Laptop', vp_tablet: 'Tablet', vp_mobile: 'Mobile', vp_a4: 'A4',
+      viewport: 'Viewport', browse: 'Browse', annotate: 'Annotate', browseTip: 'Browse: the page stays interactive', annotateTip: 'Annotate: click elements to comment · Shift multi-select · Esc to exit',
+      qa: 'QA', qaTip: 'Delivery QA', exportBtn: 'Export', exportPdf: 'Export PDF', exportHtml: 'Export annotated HTML', exporting: 'Exporting…', panel: 'Panel', panelTip: 'Show / hide panel',
+      tab_notes: 'Notes', tab_qa: 'QA', tab_el: 'Element', dockMenu: 'Panel position', hidePanel: 'Hide',
+      dock_bottom: 'Dock bottom', dock_top: 'Dock top', dock_left: 'Dock left', dock_right: 'Dock right', dock_float: 'Float', dragHint: 'Drop on an edge to dock, in the middle to float',
+      loading: 'Rendering…', failed: 'Could not render: {e}',
+      commentPh: 'Write a comment', multiHint: 'Shift: multi-select', renameShort: 'Rename', add: 'Add', cancel: 'Cancel', nickPh: 'Nickname (optional)', nick: 'Name', nickEdit: 'Change nickname', more: '+{n}',
+      notesEmpty: 'No notes yet', notesEmptyHint: 'Switch to Annotate and click an element', startAnnotate: 'Start annotating',
+      sendAll: 'Send to agent', sent: 'Placed in the composer', copied: 'Copied to clipboard', clear: 'Clear', clearConfirm: 'Confirm clear',
+      locate: 'Locate', remove: 'Delete', reply: 'Reply', replyPh: 'Write a reply', save: 'Save', rename: 'Double-click to rename', editComment: 'Double-click to edit',
+      qaNotRun: 'Not checked yet', qaStart: 'Run QA', qaRerun: 'Run again', qaRunning: 'Checking…', qaEmpty: 'No issues found', qaError: 'QA failed: {e}',
+      mustOnly: 'Must-fix only', all: 'All', allToAgent: 'Send all to agent', toNote: 'Add as note', ignore: 'Ignore', ignored: '{n} ignored', restore: 'Restore',
+      must: 'Must', hint: 'Hint', mustN: '{n} must', hintN: '{n} hints',
+      cat_numbering: 'Numbering', cat_layout: 'Layout', cat_text: 'Text', cat_visual: 'Visual', cat_asset: 'Assets', cat_delivery: 'Delivery',
+      catd_numbering: 'Figure/table numbers and references', catd_layout: 'Overflow, whitespace, pages', catd_text: 'Orphans, clipping, line length', catd_visual: 'Contrast, fonts, sizes', catd_asset: 'Images, anchors', catd_delivery: 'Banned words, length',
+      stats: '{cjk} CJK · {words} words · {fig} fig · {tab} tab', statsPages: ' · {pages} pages',
+      elEmpty: 'Nothing selected', elHint: 'Select an element in Annotate mode to see its styles', selector: 'Selector', text: 'Text', font: 'Font', color: 'Color', size: 'Size', padding: 'Padding',
+      confirmTitle: '{n} must-fix issues', exportAnyway: 'Export anyway', viewIssues: 'View', exported: 'Exported {name} · {pages} pages', open: 'Open', exportFail: 'Export failed: {e}',
+      htmlExported: 'Exported {name} · {n} notes', locateMiss: 'Element not found on the page', fileOpened: 'Opened {name} in preview',
       msgHead: 'Please revise {file} item by item and confirm each number; only change the listed elements:', msgQaHead: 'Delivery QA found these issues in {file}; fix them by number:',
-      summary: 'HTML deliverables: viewports, Select · Ask AI, QA, PDF export', sBanned: 'Banned words (one per line)', sTarget: 'Target length (0 = count only)', sViewport: 'Default viewport', sQaBefore: 'QA before export', sBrowser: 'Browser path (Edge / Chrome / Chromium / Brave; blank = auto-detect)', save: 'Save', saved: 'Saved', browserOk: 'Found: {name}', browserMissing: 'No Chromium-based browser found', browserMissingHint: 'Install Edge, Chrome, Chromium or Brave, or enter the full path to the browser executable above.',
+      msgReply: 'Reply', msgViewport: '(viewport {w}px)', anon: 'User {n}',
+      summary: 'HTML deliverables: viewports, annotations, QA, PDF / annotated HTML export', sBanned: 'Banned words (one per line)', sTarget: 'Target length (0 = count only)', sViewport: 'Default viewport', sQaBefore: 'QA before export', sBrowser: 'Browser path (Edge / Chrome / Chromium / Brave; blank = auto-detect)', saved: 'Saved', browserOk: 'Found: {name}', browserMissing: 'No Chromium-based browser found', browserMissingHint: 'Install Edge, Chrome, Chromium or Brave, or enter the full path to the browser executable above.',
     }
-    function fmt(s, p) { return String(s).replace(/\{(\w+)\}/g, (_, k) => (p && p[k] !== undefined ? p[k] : '')) }
+    function fmt(s, p) { return p ? String(s).replace(/\{(\w+)\}/g, (_, k) => (p[k] !== undefined ? p[k] : '')) : String(s) }
     let tr = (k, p) => fmt(zh[k] ?? k, p)
 
     async function bridge(path, body) {
@@ -56,6 +77,53 @@ window.__ModuleLoader__.load({
       const j = await r.json().catch(() => ({ ok: false, error: 'HTTP ' + r.status }))
       if (!r.ok && j.ok !== false) throw new Error(j.error || 'HTTP ' + r.status)
       return j
+    }
+
+    // ── 本地存储 ─────────────────────────────────────────
+    const store = {
+      get(k, d) { try { const v = JSON.parse(localStorage.getItem('deliverStudio:' + k) || 'null'); return v == null ? d : v } catch (e) { return d } },
+      set(k, v) { try { localStorage.setItem('deliverStudio:' + k, JSON.stringify(v)) } catch (e) {} },
+    }
+    const uid = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+    function getMe() { let me = store.get('me', null); if (!me || !me.id) { me = { id: uid('u'), name: '', named: false }; store.set('me', me) } return me }
+
+    // 批注合并：按 id 合并，名称/颜色/内容取较新的 updated，回复按 id 取并集
+    function mergeNotes(a, b, removed) {
+      const map = new Map()
+      const gone = new Set(removed || [])
+      for (const list of [a || [], b || []]) for (const n of list) {
+        if (!n || !n.id || gone.has(n.id)) continue
+        const cur = map.get(n.id)
+        if (!cur) { map.set(n.id, Object.assign({}, n, { replies: (n.replies || []).slice(), targets: (n.targets || []).slice() })); continue }
+        if ((n.updated || 0) > (cur.updated || 0)) Object.assign(cur, { name: n.name, color: n.color, comment: n.comment, updated: n.updated })
+        const seen = new Set(cur.replies.map((r) => r.id))
+        for (const r of n.replies || []) if (!seen.has(r.id)) { cur.replies.push(r); seen.add(r.id) }
+        cur.replies.sort((x, y) => x.time - y.time)
+      }
+      return Array.from(map.values())
+    }
+    function displayNames(notes, people, me) {
+      const events = []
+      for (const n of notes) { if (n.author) events.push({ a: n.author, t: n.time || 0 }); for (const r of n.replies || []) if (r.author) events.push({ a: r.author, t: r.time || 0 }) }
+      if (!events.some((e) => e.a.id === me.id)) events.push({ a: { id: me.id, name: me.name }, t: Infinity })
+      events.sort((x, y) => x.t - y.t)
+      const names = {}
+      let anon = 0
+      for (const e of events) {
+        const id = e.a.id
+        if (names[id]) continue
+        names[id] = (id === me.id && me.name) || people[id] || e.a.name || tr('anon', { n: ++anon })
+      }
+      return names
+    }
+    const pad = (n) => (n < 10 ? '0' : '') + n
+    const when = (t) => { const d = new Date(t); return (d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) }
+    function onColor(hex) {
+      const c = /^#?([0-9a-f]{6})$/i.exec(hex || '')
+      if (!c) return '#fff'
+      const n = parseInt(c[1], 16)
+      const ch = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+      return 0.2126 * ch(n >> 16) + 0.7152 * ch((n >> 8) & 255) + 0.0722 * ch(n & 255) > 0.42 ? '#1c1917' : '#fff'
     }
 
     // ── 地址与打包 ───────────────────────────────────────
@@ -75,6 +143,14 @@ window.__ModuleLoader__.load({
       const norm = String(path).replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
       return PREFIX + 'session/' + enc(sessionId) + '/' + norm.split('/').map(enc).join('/')
     }
+    // 相对链接按当前文件所在目录解析（处理 ./ 与 ../）
+    function resolveRelative(basePath, href) {
+      const clean = decodeURIComponent(String(href).replace(/[?#].*$/, ''))
+      const parts = String(basePath).replace(/\\/g, '/').split('/')
+      parts.pop()
+      for (const seg of clean.split('/')) { if (!seg || seg === '.') continue; if (seg === '..') { if (parts.length > 1) parts.pop() } else parts.push(seg) }
+      return parts.join('/')
+    }
     const decoder = () => new TextDecoder('utf-8')
     function b64(bytes) {
       let s = ''
@@ -85,9 +161,18 @@ window.__ModuleLoader__.load({
     const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i
     const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif' }
     function isRelative(ref) { return !!ref && !/^(?:[a-z][a-z\d+.-]*:|[/\\#?])/i.test(ref) && !ref.includes('\0') }
+    // 带批注 HTML 的嵌入块（与 browser.js / viewer.js 同格式）：预览时剥掉，数据交给工作台
+    const ANNOT_RE = /<!--deliver-studio:annotations:start-->[\s\S]*?<!--deliver-studio:annotations:end-->/g
+    function splitAnnotations(html) {
+      const m = /<script type="application\/json" id="deliver-studio-data">([\s\S]*?)<\/script>/.exec(html)
+      let data = null
+      if (m) { try { data = JSON.parse(m[1]) } catch (e) { data = null } }
+      return { html: html.replace(ANNOT_RE, ''), annotations: data }
+    }
 
     async function packDocument(data, readRelated, address, signal) {
-      const html = decoder().decode(data)
+      const split = splitAnnotations(decoder().decode(data))
+      const html = split.html
       const tpl = document.createElement('template')
       tpl.innerHTML = html
       const assets = []
@@ -125,9 +210,11 @@ window.__ModuleLoader__.load({
           } catch (e) { if (signal.aborted) throw e }
         }
       }
-      return { html, assets }
+      return { html, assets, annotations: split.annotations }
     }
 
+    // iframe 文档：用 srcdoc 装载（blob: 地址在沙箱里不允许 hash 导航，页面内的 #/路由 切换会失效），
+    // 并补 <base href="about:srcdoc">，让 <a href="#x"> 解析为本文档内的锚点而不是宿主页面地址。
     function frameDocument(bundle) {
       const payload = b64Text(JSON.stringify({ html: bundle.html, assets: bundle.assets, runtime: RUNTIME }))
       return '<!doctype html><meta charset="utf-8"><script>(()=>{' +
@@ -139,95 +226,261 @@ window.__ModuleLoader__.load({
         'const sel=a.kind==="script"?"script[src]":a.kind==="stylesheet"?"link[href]":"img[src],source[src],video[poster],image[href]";' +
         'for(const el of d.querySelectorAll(sel)){for(const at of ["src","href","poster"]){if(el.getAttribute(at)===a.ref)el.setAttribute(at,u)}}}' +
         'html="<!doctype html>"+d.documentElement.outerHTML}' +
+        'if(!/<base\\s[^>]*href/i.test(html)){const bt=\'<base href="about:srcdoc">\';const m=/<head(\\s[^>]*)?>/i.exec(html);' +
+        'if(m){const k=m.index+m[0].length;html=html.slice(0,k)+bt+html.slice(k)}else{const d=/^\\s*<!doctype[^>]*>/i.exec(html);html=d?d[0]+bt+html.slice(d[0].length):bt+html}}' +
         'const rt="<scr"+"ipt>"+b.runtime+"</scr"+"ipt>";' +
         'const i=html.search(/<\\/body\\s*>(?![\\s\\S]*<\\/body\\s*>)/i);html=i>=0?html.slice(0,i)+rt+html.slice(i):html+rt;' +
         'document.open();document.write(html);document.close();' +
         '})()<\/script>'
     }
 
-    // ── 样式 ───────────────────────────────────────────
+    // ── 图标 ───────────────────────────────────────────
+    const ICONS = {
+      monitor: 'M3 4h18v12H3z M8 20h8 M12 16v4', cursor: 'M5 3l14 7-6 2-2 6z', note: 'M4 4h16v12H9l-5 4z', shield: 'M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z M9 12l2 2 4-4',
+      panel: 'M3 4h18v16H3z M3 14h18', download: 'M12 4v11 M7 10l5 5 5-5 M5 20h14', chevron: 'M6 9l6 6 6-6', close: 'M6 6l12 12 M18 6L6 18',
+      grip: 'M9 6h.01 M15 6h.01 M9 12h.01 M15 12h.01 M9 18h.01 M15 18h.01', send: 'M4 12l16-8-6 16-2-7z', locate: 'M12 2v4 M12 18v4 M2 12h4 M18 12h4 M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8',
+      trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13', check: 'M5 12l5 5 9-10', refresh: 'M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7', minus: 'M5 12h14', reply: 'M9 14L4 9l5-5 M4 9h10a6 6 0 0 1 6 6v4',
+      dock_bottom: 'M3 4h18v16H3z M3 14h18', dock_top: 'M3 4h18v16H3z M3 10h18', dock_left: 'M3 4h18v16H3z M9 4v16', dock_right: 'M3 4h18v16H3z M15 4v16', dock_float: 'M3 4h18v16H3z M11 11h7v6h-7z',
+    }
+    function Icon({ name, size }) {
+      const s = size || 15
+      return h('svg', { width: s, height: s, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: name === 'grip' ? 3 : 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, className: 'ds-ic' },
+        ICONS[name].split(' M').map((d, i) => h('path', { key: i, d: (i ? 'M' : '') + d })))
+    }
+
+    // ── 下拉菜单（收纳选择 / 切换类功能）────────────────────
+    function Menu({ label, icon, items, title, primary, align, disabled, className }) {
+      const [open, setOpen] = useState(false)
+      const ref = useRef(null)
+      const btnRef = useRef(null)
+      useEffect(() => {
+        if (!open) return undefined
+        const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setOpen(false); try { btnRef.current && btnRef.current.focus() } catch (x) {} } }
+        const onBlur = () => setOpen(false) // 点进 iframe 时父窗口失焦
+        document.addEventListener('pointerdown', onDown, true)
+        document.addEventListener('keydown', onKey, true)
+        window.addEventListener('blur', onBlur)
+        const first = ref.current && ref.current.querySelector('[role=menuitem]:not([disabled]),[role=menuitemradio]')
+        if (first) first.focus()
+        return () => { document.removeEventListener('pointerdown', onDown, true); document.removeEventListener('keydown', onKey, true); window.removeEventListener('blur', onBlur) }
+      }, [open])
+      const onMenuKey = (e) => {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+        e.preventDefault()
+        const list = Array.from(ref.current.querySelectorAll('[role^=menuitem]:not([disabled])'))
+        const i = list.indexOf(document.activeElement)
+        const next = list[(i + (e.key === 'ArrowDown' ? 1 : list.length - 1)) % list.length]
+        if (next) next.focus()
+      }
+      return h('div', { className: 'ds-menu-wrap ' + (className || ''), ref },
+        h('button', { ref: btnRef, type: 'button', className: 'ds-btn' + (primary ? ' ds-primary' : ''), title, disabled, 'aria-haspopup': 'menu', 'aria-expanded': open, onClick: () => setOpen((o) => !o) },
+          icon ? h(Icon, { name: icon }) : null, label, h(Icon, { name: 'chevron', size: 13 })),
+        open ? h('div', { className: 'ds-menu', role: 'menu', 'data-align': align || 'left', onKeyDown: onMenuKey },
+          items.map((it) => it.sep ? h('div', { key: it.key, className: 'ds-menu-sep', role: 'separator' }) : h('button', {
+            key: it.key, type: 'button', role: it.checked !== undefined ? 'menuitemradio' : 'menuitem', 'aria-checked': it.checked, disabled: it.disabled,
+            className: 'ds-menu-item', onClick: () => { setOpen(false); it.onSelect() },
+          }, h('span', { className: 'ds-menu-check' }, it.checked ? h(Icon, { name: 'check', size: 13 }) : it.icon ? h(Icon, { name: it.icon, size: 14 }) : null),
+            h('span', { className: 'ds-menu-label' }, it.label), it.hint ? h('span', { className: 'ds-menu-hint' }, it.hint) : null))) : null)
+    }
+
+    // ── 样式（取 DSH 主题 token，跟随明暗主题）──────────────────
     const CSS = `
-.ds-root{display:flex;flex-direction:column;height:100%;min-height:360px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:12px}
-.ds-bar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);flex-wrap:wrap;background:var(--dsw-alias-bg-layer-1)}
+.ds-root{container-type:inline-size;position:relative;display:flex;flex-direction:column;height:100%;min-height:360px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:12px;line-height:1.5}
+.ds-root *{box-sizing:border-box}
+.ds-ic{flex:none;display:block}
+.ds-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-height:42px}
+.ds-sp{flex:1;min-width:4px}
+.ds-btn{flex:none;display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 9px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap;transition:background-color .12s,border-color .12s,color .12s}
+.ds-btn:hover:not(:disabled){border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
+.ds-btn:active:not(:disabled){transform:translateY(1px)}
+.ds-btn:disabled{opacity:.45;cursor:default}
+.ds-btn.ds-primary{background:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base)}
+.ds-btn.ds-primary:hover:not(:disabled){background:var(--dsw-alias-label-primary);opacity:.88}
+.ds-btn.ds-ghost{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary)}
+.ds-btn.ds-ghost:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2)}
+.ds-btn.ds-icon{width:28px;padding:0;justify-content:center}
+.ds-btn[aria-pressed=true]{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l2)}
+.ds-root button:focus-visible,.ds-root textarea:focus-visible,.ds-root input:focus-visible,.ds-root select:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .ds-seg{display:inline-flex;padding:2px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);gap:2px}
-.ds-seg button{height:24px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.ds-seg button{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
 .ds-seg button:hover{color:var(--dsw-alias-label-primary)}
-.ds-seg button[aria-checked=true]{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 0 0 1px var(--dsw-alias-border-l1)}
-.ds-sp{flex:1}
-.ds-zoom{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}
-.ds-btn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 11px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
-.ds-btn:hover:not(:disabled){border-color:var(--dsw-alias-border-l2)}
-.ds-btn:disabled{opacity:.5;cursor:default}
-.ds-btn[data-primary]{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base)}
-.ds-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;font-size:11px;line-height:16px;text-align:center;font-variant-numeric:tabular-nums;background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-base)}
+.ds-seg button[aria-checked=true]{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 0 0 1px var(--dsw-alias-border-l1),0 1px 2px rgba(0,0,0,.06)}
+.ds-seg button[data-annot][aria-checked=true]{color:var(--dsw-alias-brand-primary)}
+.ds-zoom{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
+.ds-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;font-size:10.5px;line-height:16px;text-align:center;font-variant-numeric:tabular-nums;background:var(--dsw-alias-state-error-primary);color:#fff;font-weight:600}
 .ds-badge[data-ok]{background:var(--dsw-alias-state-success-primary)}
-.ds-main{flex:1;min-height:0;display:flex}
-.ds-main[data-narrow]{flex-direction:column}
+.ds-badge[data-neutral]{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l1)}
+.ds-menu-wrap{position:relative;display:inline-flex}
+.ds-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:30;min-width:190px;padding:4px;border-radius:9px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-overlay);box-shadow:0 10px 28px rgba(0,0,0,.16);display:flex;flex-direction:column;animation:ds-pop .12s ease-out}
+.ds-menu[data-align=right]{left:auto;right:0}
+.ds-menu-item{display:flex;align-items:center;gap:8px;height:30px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;text-align:left}
+.ds-menu-item:hover:not(:disabled),.ds-menu-item:focus-visible{background:var(--dsw-alias-bg-layer-2);outline:none}
+.ds-menu-item:disabled{opacity:.45;cursor:default}
+.ds-menu-check{width:16px;display:inline-flex;justify-content:center;color:var(--dsw-alias-label-secondary)}
+.ds-menu-label{flex:1}
+.ds-menu-hint{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
+.ds-menu-sep{height:1px;margin:4px 6px;background:var(--dsw-alias-border-l1)}
+@keyframes ds-pop{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.ds-banner{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);flex-wrap:wrap}
+.ds-banner[data-tone=bad]{box-shadow:inset 3px 0 0 var(--dsw-alias-state-error-primary)}
+.ds-banner[data-tone=ok]{box-shadow:inset 3px 0 0 var(--dsw-alias-state-success-primary)}
+.ds-banner[data-tone=warn]{box-shadow:inset 3px 0 0 var(--dsw-alias-state-warn-primary)}
+.ds-body{flex:1;min-height:0;display:flex;position:relative}
+.ds-body[data-dock=bottom]{flex-direction:column}
+.ds-body[data-dock=top]{flex-direction:column-reverse}
+.ds-body[data-dock=right]{flex-direction:row}
+.ds-body[data-dock=left]{flex-direction:row-reverse}
 .ds-stage{flex:1;min-width:0;min-height:0;position:relative;overflow:auto;background:var(--dsw-alias-bg-layer-2)}
-.ds-canvas{position:relative;margin:0 auto;transform-origin:top left}
+.ds-canvas{position:relative;transform-origin:top left}
 .ds-frame{display:block;border:0;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12),0 8px 24px rgba(0,0,0,.08)}
+.ds-root[data-dragging] .ds-frame,.ds-root[data-dragging] .ds-stage{pointer-events:none}
+.ds-root[data-dragging]{user-select:none}
 .ds-status{padding:16px;color:var(--dsw-alias-label-secondary)}
 .ds-status[data-bad]{color:var(--dsw-alias-state-error-primary)}
-.ds-side{width:300px;flex:none;border-left:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);overflow:auto;display:flex;flex-direction:column}
-.ds-main[data-narrow] .ds-side{width:auto;border-left:0;border-top:1px solid var(--dsw-alias-border-l1);max-height:45%}
-.ds-sec{padding:12px;border-bottom:1px solid var(--dsw-alias-border-l1);display:flex;flex-direction:column;gap:8px}
-.ds-sec h4{margin:0;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px}
+.ds-split{flex:none;background:var(--dsw-alias-border-l1);position:relative;z-index:2}
+.ds-body[data-dock=bottom] .ds-split,.ds-body[data-dock=top] .ds-split{height:1px;cursor:row-resize}
+.ds-body[data-dock=left] .ds-split,.ds-body[data-dock=right] .ds-split{width:1px;cursor:col-resize}
+.ds-split::after{content:'';position:absolute;inset:-4px}
+.ds-split:hover,.ds-split[data-active]{background:var(--dsw-alias-brand-primary)}
+.ds-panel{flex:none;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--dsw-alias-bg-layer-1);overflow:hidden}
+.ds-panel[data-dock=float]{position:absolute;z-index:20;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 14px 36px rgba(0,0,0,.2);resize:both;min-width:280px;min-height:180px;max-width:100%;max-height:100%}
+.ds-ph{display:flex;align-items:center;gap:4px;padding:4px 6px 4px 4px;border-bottom:1px solid var(--dsw-alias-border-l1);cursor:grab;flex:none;min-height:36px;user-select:none;touch-action:none}
+.ds-ph:active{cursor:grabbing}
+.ds-grip{display:inline-flex;align-items:center;justify-content:center;width:22px;height:28px;color:var(--dsw-alias-label-secondary);opacity:.6;border-radius:6px}
+.ds-ph:hover .ds-grip{opacity:1;background:var(--dsw-alias-bg-layer-2)}
+.ds-tabs{display:flex;gap:2px}
+.ds-tab{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
+.ds-tab:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2)}
+.ds-tab[aria-selected=true]{color:var(--dsw-alias-label-primary);font-weight:600;background:var(--dsw-alias-bg-layer-2)}
+.ds-pb{flex:1;min-height:0;overflow:auto;padding:8px 10px 12px}
+.ds-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px}
 .ds-muted{color:var(--dsw-alias-label-secondary)}
-.ds-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;align-items:baseline}
-.ds-kv span:nth-child(odd){color:var(--dsw-alias-label-secondary)}
-.ds-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;word-break:break-all;color:var(--dsw-alias-label-primary)}
-.ds-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;border:1px solid var(--dsw-alias-border-l2);vertical-align:-1px;margin-right:4px}
-.ds-input{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1);border-radius:7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;padding:6px 8px;resize:vertical}
+.ds-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:18px 8px;text-align:center;color:var(--dsw-alias-label-secondary);height:100%;min-height:96px}
+.ds-empty b{color:var(--dsw-alias-label-primary);font-weight:600;font-size:13px}
+.ds-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));align-items:start}
+.ds-card{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;background:var(--dsw-alias-bg-base);padding:8px 10px;display:flex;flex-direction:column;gap:5px;transition:border-color .15s,box-shadow .15s}
+.ds-card:hover{border-color:var(--dsw-alias-border-l2)}
+.ds-card[data-focus]{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
+.ds-card-h{display:flex;align-items:center;gap:6px;min-height:22px}
+.ds-pin{display:inline-flex;align-items:center;max-width:150px;height:20px;padding:0 7px;border:0;border-radius:10px 10px 10px 2px;font:700 11px/20px system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}
+.ds-pin-in{height:22px;width:120px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;padding:0 6px;font:inherit;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}
+.ds-meta{color:var(--dsw-alias-label-secondary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ds-acts{display:flex;gap:0;margin-left:auto;opacity:.55;transition:opacity .12s}
+.ds-card:hover .ds-acts,.ds-card:focus-within .ds-acts,.ds-issue:hover .ds-acts,.ds-issue:focus-within .ds-acts{opacity:1}
+@media (hover:none){.ds-acts{opacity:1}}
+.ds-act{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.ds-act:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
+.ds-act[data-danger]:hover{color:var(--dsw-alias-state-error-primary)}
+.ds-comment{white-space:pre-wrap;word-break:break-word;font-size:12.5px}
+.ds-reply{border-left:2px solid var(--dsw-alias-border-l2);padding:1px 0 1px 8px;display:flex;flex-direction:column}
+.ds-link{border:0;background:none;padding:0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
+.ds-link:hover{color:var(--dsw-alias-label-primary)}
+.ds-input{width:100%;border:1px solid var(--dsw-alias-border-l1);border-radius:7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px;padding:6px 8px;resize:vertical}
 .ds-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
-.ds-tray{border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);padding:8px 10px;display:flex;flex-direction:column;gap:6px;max-height:34%;overflow:auto}
-.ds-tray-head{display:flex;align-items:center;gap:8px}
-.ds-note{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-radius:7px;background:var(--dsw-alias-bg-layer-2)}
-.ds-num{flex:none;font-weight:600;color:var(--dsw-alias-brand-primary)}
-.ds-note-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-.ds-link{border:0;background:none;padding:0 4px;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
-.ds-link:hover{color:var(--dsw-alias-brand-primary)}
-.ds-issue{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l1)}
-.ds-issue:last-child{border-bottom:0}
-.ds-dot{width:7px;height:7px;border-radius:4px;margin-top:4px;background:var(--dsw-alias-state-warn-primary)}
-.ds-dot[data-level=must]{background:var(--dsw-alias-state-error-primary)}
-.ds-issue-title{font-weight:600;line-height:1.5}
-.ds-issue-actions{grid-column:2;display:flex;gap:2px;margin-left:-4px}
-.ds-chip{display:inline-block;padding:0 6px;border-radius:9px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:18px}
-.ds-banner{margin:8px 10px 0;padding:10px 12px;border-radius:9px;border:1px solid var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;gap:8px}
-.ds-banner[data-ok]{border-color:var(--dsw-alias-state-success-primary)}
-.ds-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ds-dots{display:flex;gap:5px;align-items:center}
+.ds-dot{width:16px;height:16px;border-radius:8px;border:2px solid var(--dsw-alias-bg-base);box-shadow:0 0 0 1px var(--dsw-alias-border-l2);padding:0;cursor:pointer}
+.ds-dot[aria-checked=true]{box-shadow:0 0 0 2px var(--dsw-alias-label-primary)}
+.ds-chip{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap}
+.ds-chip:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}
+.ds-chip[aria-pressed=true]{background:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base)}
+.ds-chip .ds-cnt{font-variant-numeric:tabular-nums;opacity:.75}
+.ds-chip .ds-mdot{width:6px;height:6px;border-radius:3px;background:var(--dsw-alias-state-error-primary)}
+.ds-composer{position:absolute;z-index:25;width:288px;max-width:calc(100% - 16px);padding:10px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-overlay);box-shadow:0 14px 36px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:8px;animation:ds-pop .12s ease-out}
+.ds-composer[data-pass]{opacity:.3;pointer-events:none}
+.ds-composer-h{display:flex;align-items:center;gap:6px;min-width:0}
+.ds-target{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary)}
+.ds-target code{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--dsw-alias-label-primary)}
+.ds-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.ds-nick{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-secondary);font-size:12px}
+.ds-nick input{height:24px;width:120px;padding:0 7px}
+.ds-group{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:8px;overflow:hidden}
+.ds-group-h{display:flex;align-items:center;gap:8px;width:100%;height:34px;padding:0 10px;border:0;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;text-align:left}
+.ds-group-h:hover{background:var(--dsw-alias-bg-layer-2)}
+.ds-group-h .ds-ic{transition:transform .15s;color:var(--dsw-alias-label-secondary)}
+.ds-group-h[aria-expanded=false] .ds-ic{transform:rotate(-90deg)}
+.ds-group-h b{font-weight:600}
+.ds-pill{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:9px;font-size:11px;font-weight:600;white-space:nowrap;flex:none}
+.ds-pill[data-level=must]{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 14%,transparent);color:var(--dsw-alias-state-error-primary)}
+.ds-pill[data-level=hint]{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 16%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 70%,var(--dsw-alias-label-primary))}
+.ds-issue{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-top:1px solid var(--dsw-alias-border-l1)}
+.ds-issue-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;cursor:pointer}
+.ds-issue-t{font-weight:500;line-height:1.45}
+.ds-issue-d{color:var(--dsw-alias-label-secondary);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ds-issue[data-open] .ds-issue-d{white-space:normal}
+.ds-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;align-items:baseline;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:8px}
+.ds-kv>span:nth-child(odd){color:var(--dsw-alias-label-secondary)}
+.ds-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;word-break:break-all}
+.ds-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;border:1px solid var(--dsw-alias-border-l2);vertical-align:-1px;margin-right:4px}
+.ds-zone{position:absolute;z-index:40;pointer-events:none;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 16%,transparent);border:2px dashed var(--dsw-alias-brand-primary);border-radius:8px;transition:all .1s}
+.ds-dragbox{position:absolute;z-index:41;pointer-events:none;border:2px solid var(--dsw-alias-brand-primary);border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 70%,transparent)}
+.ds-draghint{position:absolute;z-index:42;left:50%;top:10px;transform:translateX(-50%);padding:4px 10px;border-radius:12px;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base);font-size:12px;pointer-events:none}
+.ds-toast{position:absolute;z-index:50;left:50%;bottom:16px;transform:translateX(-50%);padding:7px 12px;border-radius:8px;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base);font-size:12px;box-shadow:0 6px 18px rgba(0,0,0,.2);pointer-events:none;animation:ds-pop .12s ease-out}
 .ds-page{display:grid;grid-template-columns:minmax(0,560px);gap:14px;font-size:13px}
-.ds-card{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.ds-scard{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:14px 16px;display:flex;flex-direction:column;gap:10px}
 .ds-field{display:flex;flex-direction:column;gap:6px}
 .ds-field>span{font-size:12px;color:var(--dsw-alias-label-secondary)}
+@container (max-width:560px){.ds-lbl,.ds-zoom{display:none}.ds-seg button{padding:0 7px}.ds-bar{gap:4px;padding:6px}}
+@container (max-width:400px){.ds-vp-w{display:none}}
+@media (prefers-reduced-motion:reduce){.ds-root *,.ds-menu,.ds-composer,.ds-toast{animation:none!important;transition:none!important}}
 `
 
     // ── 工作台 ─────────────────────────────────────────
+    const PANEL_DEFAULT = { open: false, tab: 'notes', dock: 'bottom', size: { bottom: 240, top: 240, left: 320, right: 320 }, float: { x: null, y: null, w: 420, h: 320 } }
+    function loadPanel() {
+      const p = store.get('panel', null)
+      if (!p || typeof p !== 'object') return PANEL_DEFAULT
+      return Object.assign({}, PANEL_DEFAULT, p, { size: Object.assign({}, PANEL_DEFAULT.size, p.size), float: Object.assign({}, PANEL_DEFAULT.float, p.float), dock: DOCKS.includes(p.dock) ? p.dock : 'bottom' })
+    }
+
     function makeWorkbench(ctx, describeOnce) {
       return function Workbench(props) {
         const { content, resourceAddress, readRelated, inputActions } = props
         const file = useMemo(() => parseAddress(resourceAddress), [resourceAddress])
         const sessionId = props.sessionId || (file && file.sessionId)
-        const fileName = file ? file.path.split('/').pop() : ''
+        const filePath = file ? file.path : ''
+        const fileName = filePath.split('/').pop() || ''
+        const storeKey = 'notes:' + filePath.replace(/\\/g, '/').toLowerCase().replace(/\.annotated(\.html?)$/, '$1')
         const [config, setConfig] = useState(null)
         const [vp, setVp] = useState(null)
         const [mode, setMode] = useState('browse')
         const [frame, setFrame] = useState(null)
+        const [ready, setReady] = useState(false)
         const [stageW, setStageW] = useState(0)
-        const [narrow, setNarrow] = useState(false)
         const [selection, setSelection] = useState([])
-        const [comment, setComment] = useState('')
-        const [notes, setNotes] = useState([])
+        const [anchor, setAnchor] = useState(null)
+        const [draft, setDraftText] = useState('')
+        const [draftColor, setDraftColor] = useState(() => store.get('color', COLORS[0]))
+        const [me, setMe] = useState(getMe)
+        const [nickEdit, setNickEdit] = useState(false)
+        const [doc, setDoc] = useState({ docId: '', notes: [], people: {}, removed: [] })
+        const [focusNote, setFocusNote] = useState(null)
         const [qa, setQa] = useState(null)
         const [qaBusy, setQaBusy] = useState(false)
-        const [panel, setPanel] = useState('none')
+        const [qaCat, setQaCat] = useState('all')
+        const [mustOnly, setMustOnly] = useState(false)
+        const [collapsed, setCollapsed] = useState({})
+        const [openIssue, setOpenIssue] = useState(null)
         const [ignored, setIgnored] = useState([])
+        const [panel, setPanelState] = useState(loadPanel)
+        const [drag, setDrag] = useState(null)
         const [exportState, setExportState] = useState(null)
         const [toast, setToast] = useState('')
+        const [, setTick] = useState(0)
+        const [shiftHeld, setShiftHeld] = useState(false)
         const frameRef = useRef(null)
         const stageRef = useRef(null)
         const rootRef = useRef(null)
+        const bodyRef = useRef(null)
+        const panelRef = useRef(null)
         const pending = useRef(new Map())
+        const routeRef = useRef('')
+        const frameSeq = useRef(0)
+        const live = useRef({})
+        const composerRef = useRef(null)
+
+        const setPanel = useCallback((patch) => setPanelState((p) => { const n = Object.assign({}, p, typeof patch === 'function' ? patch(p) : patch); store.set('panel', n); return n }), [])
+        const flash = useCallback((s) => { setToast(s); clearTimeout(live.current.toastTimer); live.current.toastTimer = setTimeout(() => setToast(''), 2600) }, [])
 
         useEffect(() => { let alive = true; describeOnce().then((d) => { if (alive && d && d.ok) { setConfig(d); setVp((v) => v || d.config.defaultViewport || 'desktop') } }, () => { if (alive) setVp((v) => v || 'desktop') }); return () => { alive = false } }, [])
         const viewport = VIEWPORTS.find((v) => v.id === (vp || 'desktop')) || VIEWPORTS[0]
@@ -238,49 +491,91 @@ window.__ModuleLoader__.load({
           if (!data) return undefined
           const controller = new AbortController()
           setFrame(null)
+          routeRef.current = ''
           ;(async () => {
             try {
               const bundle = await packDocument(data, readRelated, resourceAddress, controller.signal)
               if (controller.signal.aborted) return
-              const url = URL.createObjectURL(new Blob([frameDocument(bundle)], { type: 'text/html' }))
-              setFrame({ url, assets: bundle.assets.length })
+              setFrame({ id: ++frameSeq.current, srcdoc: frameDocument(bundle), assets: bundle.assets.length, annotations: bundle.annotations })
             } catch (e) {
               if (!controller.signal.aborted) setFrame({ error: String(e && e.message || e) })
             }
           })()
           return () => controller.abort()
         }, [data, resourceAddress, readRelated])
-        useEffect(() => () => { if (frame && frame.url) URL.revokeObjectURL(frame.url) }, [frame])
-        useEffect(() => { setQa(null); setSelection([]) }, [data, vp])
+        useEffect(() => { setQa(null); setSelection([]); setAnchor(null); setReady(false) }, [data, vp])
+
+        // 批注数据：本地存储 + 文件里嵌入的批注合并
+        useEffect(() => {
+          const local = store.get(storeKey, null) || { docId: '', notes: [], people: {}, removed: [] }
+          const emb = frame && frame.annotations
+          setDoc({
+            docId: (emb && emb.docId) || local.docId || uid('d'),
+            notes: mergeNotes(local.notes, emb && emb.notes, local.removed),
+            people: Object.assign({}, emb && emb.people, local.people),
+            removed: local.removed || [],
+          })
+        }, [storeKey, frame && frame.annotations])
+        useEffect(() => { if (doc.docId) store.set(storeKey, doc) }, [doc])
+        const notes = doc.notes
+        const names = useMemo(() => displayNames(notes, doc.people, me), [notes, doc.people, me])
+        const updateNotes = (fn) => setDoc((d) => Object.assign({}, d, { notes: fn(d.notes) }))
+        const patchNote = (id, patch) => updateNotes((list) => list.map((n) => (n.id === id ? Object.assign({}, n, patch, { updated: Date.now() }) : n)))
 
         // 舞台尺寸 → 缩放
         useEffect(() => {
           const el = stageRef.current
-          const root = rootRef.current
-          if (!el || !root || typeof ResizeObserver === 'undefined') return undefined
-          const ro = new ResizeObserver(() => { setStageW(el.clientWidth); setNarrow(root.clientWidth < 760) })
-          ro.observe(el); ro.observe(root)
-          setStageW(el.clientWidth); setNarrow(root.clientWidth < 760)
-          return () => ro.disconnect()
-        }, [frame])
+          if (!el || typeof ResizeObserver === 'undefined') return undefined
+          const ro = new ResizeObserver(() => { setStageW(el.clientWidth); setTick((t) => t + 1) })
+          ro.observe(el)
+          setStageW(el.clientWidth)
+          const onScroll = () => setTick((t) => t + 1)
+          el.addEventListener('scroll', onScroll, { passive: true })
+          return () => { ro.disconnect(); el.removeEventListener('scroll', onScroll) }
+        }, [frame, panel.dock, panel.open])
         const scale = stageW > 0 ? Math.min(1, (stageW - 24) / viewport.w) : 1
         const frameH = Math.max(viewport.h, 600)
 
         // iframe 消息
         const send = useCallback((msg) => { const w = frameRef.current && frameRef.current.contentWindow; if (w) { msg[TAG] = true; w.postMessage(msg, '*') } }, [])
+        const pinPayload = useMemo(() => notes.map((n) => ({ id: n.id, label: n.name || '·', color: n.color, comment: n.comment, targets: n.targets })), [notes])
+        live.current.mode = mode
+        live.current.selection = selection
         useEffect(() => {
           const onMsg = (e) => {
             const d = e.data
             if (!d || d[TAG] !== true || !frameRef.current || e.source !== frameRef.current.contentWindow) return
-            if (d.type === 'ready') send({ type: 'mode', mode })
-            else if (d.type === 'select') setSelection((cur) => (d.additive ? cur.filter((x) => x.selector !== d.item.selector).concat([d.item]) : [d.item]))
-            else if (d.type === 'unselect') setSelection((cur) => cur.filter((x) => x.selector !== d.selector))
+            if (d.type === 'ready') {
+              setReady(true)
+              send({ type: 'mode', mode: live.current.mode })
+              if (routeRef.current && routeRef.current !== d.hash) send({ type: 'route', hash: routeRef.current })
+            } else if (d.type === 'select') {
+              setSelection((cur) => (d.additive ? cur.filter((x) => x.selector !== d.item.selector).concat([d.item]) : [d.item]))
+              setAnchor(d.item.vrect)
+              // Shift 追加选择时焦点留在预览里，方便继续多选；单选时把光标放进输入框
+              if (!d.additive) setTimeout(() => { try { composerRef.current && composerRef.current.focus({ preventScroll: true }) } catch (x) {} }, 0)
+            } else if (d.type === 'unselect') {
+              setSelection((cur) => { const next = cur.filter((x) => x.selector !== d.selector); if (!next.length) setAnchor(null); return next })
+            } else if (d.type === 'sel-rect') setAnchor(d.vrect)
+            else if (d.type === 'shift') setShiftHeld(!!d.down)
             else if (d.type === 'qa-result') { const p = pending.current.get(d.id); if (p) { pending.current.delete(d.id); p(d.result) } }
+            else if (d.type === 'route') routeRef.current = d.hash || ''
+            else if (d.type === 'pin') { setFocusNote(d.id); setPanel({ open: true, tab: 'notes' }) }
+            else if (d.type === 'esc') {
+              if (live.current.selection.length) { setSelection([]); setAnchor(null); send({ type: 'clear' }) } else if (live.current.mode === 'select') setMode('browse')
+            } else if (d.type === 'locate-miss') flash(tr('locateMiss'))
+            else if (d.type === 'open-url') { try { window.open(d.href, '_blank', 'noopener,noreferrer') } catch (x) {} }
+            else if (d.type === 'open-file') {
+              const target = resolveRelative(filePath, d.href)
+              try { const sr = ctx.get('sidebarRight'); if (sr && sr.openResource && sessionId) { sr.openResource(sessionFileAddress(sessionId, target)); flash(tr('fileOpened', { name: target.split('/').pop() })) } } catch (x) {}
+            }
           }
           window.addEventListener('message', onMsg)
           return () => window.removeEventListener('message', onMsg)
-        }, [send, mode])
-        useEffect(() => { send({ type: 'mode', mode }); if (mode !== 'select') setSelection([]) }, [mode, send])
+        }, [send, filePath, sessionId, flash, setPanel])
+        useEffect(() => { send({ type: 'mode', mode }); if (mode !== 'select') { setSelection([]); setAnchor(null) } }, [mode, send])
+        useEffect(() => { if (ready) send({ type: 'scale', scale }) }, [scale, ready, send])
+        useEffect(() => { if (ready) send({ type: 'notes', notes: pinPayload, focus: focusNote }) }, [pinPayload, focusNote, ready, send])
 
         const runQa = useCallback(() => new Promise((resolve) => {
           const id = 'qa' + Date.now() + Math.random().toString(36).slice(2, 6)
@@ -288,9 +583,9 @@ window.__ModuleLoader__.load({
           pending.current.set(id, (r) => { clearTimeout(timer); resolve(r) })
           send({ type: 'qa', id, options: { bannedWords: config && config.config.bannedWords, targetChars: config && config.config.targetChars } })
         }), [send, config])
-        const doQa = async () => { setQaBusy(true); setPanel('qa'); const r = await runQa(); setQa(r); setIgnored([]); setQaBusy(false); return r }
+        const doQa = async () => { setQaBusy(true); setPanel({ open: true, tab: 'qa' }); const r = await runQa(); setQa(r); setIgnored([]); setQaBusy(false); return r }
 
-        const setDraft = (text) => {
+        const setComposerDraft = (text) => {
           try { if (inputActions && typeof inputActions.setDraft === 'function') { inputActions.setDraft(text); return true } } catch (e) {}
           try {
             const conv = ctx.get('conversation')
@@ -300,37 +595,56 @@ window.__ModuleLoader__.load({
           try { navigator.clipboard.writeText(text) } catch (e) {}
           return false
         }
-        const flash = (s) => { setToast(s); setTimeout(() => setToast(''), 3200) }
+        const deliver = (text) => flash(setComposerDraft(text) ? tr('sent') : tr('copied'))
 
+        // ── 批注操作 ──
+        const commitNick = (value) => { const next = Object.assign({}, me, { name: String(value || '').trim().slice(0, 24), named: true }); store.set('me', next); setMe(next); if (next.name) setDoc((d) => Object.assign({}, d, { people: Object.assign({}, d.people, { [next.id]: next.name }) })); setNickEdit(false) }
+        const ensureNamed = () => { if (!me.named) { const next = Object.assign({}, me, { named: true }); store.set('me', next); setMe(next) } }
+        const nextName = () => String(1 + notes.reduce((m, n) => Math.max(m, /^\d+$/.test(n.name || '') ? Number(n.name) : 0), 0))
         const addNote = () => {
-          if (!selection.length || !comment.trim()) return
-          setNotes((n) => n.concat([{ id: Date.now(), targets: selection, comment: comment.trim() }]))
-          setComment('')
-          setSelection([])
-          send({ type: 'clear' })
+          if (!selection.length || !draft.trim()) return
+          ensureNamed()
+          const now = Date.now()
+          const note = { id: uid('n'), name: nextName(), color: draftColor, comment: draft.trim(), author: { id: me.id, name: me.name }, time: now, updated: now, targets: selection.map((s) => ({ selector: s.selector, tag: s.tag, text: s.text, route: s.route || '', styles: s.styles, html: s.html, rect: s.rect })), replies: [] }
+          updateNotes((list) => list.concat([note]))
+          store.set('color', draftColor)
+          setDraftText(''); closeComposer()
         }
+        // 关闭批注气泡并把焦点还给预览：可以接着点选下一个元素，Esc 也能直接退出批注模式
+        function closeComposer() { setSelection([]); setAnchor(null); send({ type: 'clear' }); try { frameRef.current && frameRef.current.focus() } catch (x) {} }
+        const removeNote = (id) => setDoc((d) => Object.assign({}, d, { notes: d.notes.filter((n) => n.id !== id), removed: d.removed.concat([id]) }))
+        const clearNotes = () => setDoc((d) => Object.assign({}, d, { notes: [], removed: d.removed.concat(d.notes.map((n) => n.id)) }))
+        const addReply = (id, text) => { if (!text.trim()) return false; ensureNamed(); updateNotes((list) => list.map((n) => (n.id === id ? Object.assign({}, n, { replies: n.replies.concat([{ id: uid('r'), author: { id: me.id, name: me.name }, time: Date.now(), text: text.trim() }]) }) : n))); return true }
+        const locateNote = (n) => { setFocusNote(n.id); if (n.targets[0]) send({ type: 'locate', target: n.targets[0] }) }
+
         const describeTarget = (t) => {
           const s = t.styles || {}
-          return '[' + t.selector + '] 「' + (t.text || '').slice(0, 80) + '」 字号 ' + s.fontSize + ' · 字重 ' + s.fontWeight + ' · 颜色 ' + s.color + (s.background && s.background !== 'rgba(0, 0, 0, 0)' ? ' · 背景 ' + s.background : '') + '\n   HTML：' + (t.html || '').replace(/\s+/g, ' ').slice(0, 240)
+          const style = s.fontSize ? ' 字号 ' + s.fontSize + ' · 字重 ' + s.fontWeight + ' · 颜色 ' + s.color + (s.background && s.background !== 'rgba(0, 0, 0, 0)' ? ' · 背景 ' + s.background : '') : ''
+          return '[' + t.selector + ']' + (t.route ? ' 路由 ' + t.route : '') + ' 「' + (t.text || '').slice(0, 80) + '」' + style + (t.html ? '\n   HTML：' + t.html.replace(/\s+/g, ' ').slice(0, 240) : '')
         }
-        const filePath = file ? file.path : fileName
         const sendNotes = () => {
-          const lines = [fmt(tr('msgHead'), { file: filePath })]
+          const lines = [tr('msgHead', { file: filePath })]
           notes.forEach((n, i) => {
-            lines.push(CIRCLED[i] + ' ' + n.comment)
+            lines.push((CIRCLED[i] || (i + 1) + '.') + ' 【' + (n.name || i + 1) + '】' + n.comment)
             n.targets.forEach((t) => lines.push('   ' + describeTarget(t)))
+            n.replies.forEach((r) => lines.push('   ' + tr('msgReply') + '（' + names[r.author && r.author.id] + '）：' + r.text))
           })
-          lines.push('（视口 ' + viewport.w + 'px）')
-          flash(setDraft(lines.join('\n')) ? tr('sent') : tr('sent') + '（已复制到剪贴板）')
-        }
-        const issueText = (i, k) => (CIRCLED[k] || (k + 1) + '.') + ' [' + (i.level === 'must' ? '必改' : '建议') + '·' + tr('cat_' + i.cat) + '] ' + i.title + (i.detail ? '｜' + i.detail : '') + (i.selector ? '｜位置 ' + i.selector : '') + (i.fix ? ' → ' + i.fix : '')
-        const visibleIssues = qa && qa.issues ? qa.issues.filter((i) => !ignored.includes(i.id)).sort((a, b) => (a.level === b.level ? 0 : a.level === 'must' ? -1 : 1)) : []
-        const issueToNote = (i) => setNotes((n) => n.concat([{ id: Date.now(), targets: i.selector ? [{ selector: i.selector, text: i.detail, styles: {}, html: '' }] : [], comment: '[QA] ' + i.title + (i.fix ? '，' + i.fix : '') }]))
-        const sendAllIssues = () => {
-          const lines = [fmt(tr('msgQaHead'), { file: filePath })].concat(visibleIssues.map(issueText))
-          flash(setDraft(lines.join('\n')) ? tr('sent') : tr('sent') + '（已复制到剪贴板）')
+          lines.push(tr('msgViewport', { w: viewport.w }))
+          deliver(lines.join('\n'))
         }
 
+        // ── QA ──
+        const issueText = (i, k) => (CIRCLED[k] || (k + 1) + '.') + ' [' + (i.level === 'must' ? '必改' : '建议') + '·' + tr('cat_' + i.cat) + '] ' + i.title + (i.detail ? '｜' + i.detail : '') + (i.selector ? '｜位置 ' + i.selector : '') + (i.fix ? ' → ' + i.fix : '')
+        const liveIssues = qa && qa.issues ? qa.issues.filter((i) => !ignored.includes(i.id)) : []
+        const shownIssues = liveIssues.filter((i) => (qaCat === 'all' || i.cat === qaCat) && (!mustOnly || i.level === 'must'))
+        const issueToNote = (i) => {
+          const now = Date.now()
+          updateNotes((list) => list.concat([{ id: uid('n'), name: nextName(), color: i.level === 'must' ? COLORS[0] : COLORS[1], comment: '[QA] ' + i.title + (i.fix ? '，' + i.fix : ''), author: { id: me.id, name: me.name }, time: now, updated: now, targets: i.selector ? [{ selector: i.selector, tag: '', text: '', route: routeRef.current }] : [], replies: [] }]))
+          flash(tr('toNote') + ' ✓')
+        }
+        const sendAllIssues = () => deliver([tr('msgQaHead', { file: filePath })].concat(shownIssues.map(issueText)).join('\n'))
+
+        // ── 导出 ──
         const doExport = async (force) => {
           setExportState({ busy: true })
           try {
@@ -340,88 +654,322 @@ window.__ModuleLoader__.load({
               const must = (r.issues || []).filter((i) => i.level === 'must').length
               if (must > 0) { setExportState({ confirm: must }); return }
             }
-            const r = await bridge('/export', { sessionId, path: file ? file.path : '', force: true })
+            const r = await bridge('/export', { sessionId, path: filePath, force: true })
             if (!r.ok) throw new Error(r.error || 'export failed')
-            setExportState({ done: r })
-            try { const sr = ctx.get('sidebarRight'); if (sr && sr.openResource && sessionId) sr.openResource(sessionFileAddress(sessionId, r.pdfPath)) } catch (e) {}
+            setExportState({ done: r, kind: 'pdf' })
           } catch (e) { setExportState({ error: String(e && e.message || e) }) }
         }
-        const openPdf = (p) => { try { const sr = ctx.get('sidebarRight'); if (sr && sr.openResource) sr.openResource(sessionFileAddress(sessionId, p)) } catch (e) {} }
+        const doExportHtml = async () => {
+          setExportState({ busy: true })
+          try {
+            const clean = notes.map((n) => Object.assign({}, n, { targets: n.targets.map((t) => ({ selector: t.selector, tag: t.tag, text: t.text, route: t.route || '' })) }))
+            const r = await bridge('/annotated', { sessionId, path: filePath, notes: clean, people: doc.people, docId: doc.docId, title: fileName })
+            if (!r.ok) throw new Error(r.error || 'export failed')
+            setExportState({ done: r, kind: 'html' })
+          } catch (e) { setExportState({ error: String(e && e.message || e) }) }
+        }
+        const openFile = (p) => { try { const sr = ctx.get('sidebarRight'); if (sr && sr.openResource) sr.openResource(sessionFileAddress(sessionId, p)) } catch (e) {} }
+
+        // ── 面板拖动停靠 / 调整大小 ──
+        const zoneOf = (x, y) => {
+          const b = bodyRef.current.getBoundingClientRect()
+          const m = Math.min(64, b.width * 0.18, b.height * 0.22)
+          if (y - b.top < m) return 'top'
+          if (b.bottom - y < m) return 'bottom'
+          if (x - b.left < m) return 'left'
+          if (b.right - x < m) return 'right'
+          return 'float'
+        }
+        const onHeadDown = (e) => {
+          if (e.button !== 0 || e.target.closest('button,input,textarea,select')) return
+          e.preventDefault()
+          const pr = panelRef.current.getBoundingClientRect()
+          const b = bodyRef.current.getBoundingClientRect()
+          const start = { x: e.clientX, y: e.clientY, dx: e.clientX - pr.left, dy: e.clientY - pr.top, w: Math.min(panel.float.w, b.width - 16), h: Math.min(panel.float.h, b.height - 16) }
+          const el = e.currentTarget
+          el.setPointerCapture(e.pointerId)
+          let moved = false
+          const move = (ev) => {
+            if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 5) return
+            moved = true
+            const x = Math.min(Math.max(ev.clientX - b.left - Math.min(start.dx, start.w - 40), 0), b.width - start.w)
+            const y = Math.min(Math.max(ev.clientY - b.top - Math.min(start.dy, 18), 0), b.height - 40)
+            setDrag({ x, y, w: start.w, h: start.h, zone: zoneOf(ev.clientX, ev.clientY) })
+          }
+          const up = (ev) => {
+            el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up)
+            if (!moved) return
+            setDrag((dr) => {
+              if (dr) {
+                if (dr.zone === 'float') setPanel((p) => ({ dock: 'float', float: Object.assign({}, p.float, { x: Math.round(dr.x), y: Math.round(dr.y) }) }))
+                else setPanel({ dock: dr.zone })
+              }
+              return null
+            })
+          }
+          el.addEventListener('pointermove', move); el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up)
+        }
+        const onSplitDown = (e) => {
+          if (e.button !== 0) return
+          const el = e.currentTarget
+          el.setPointerCapture(e.pointerId)
+          el.setAttribute('data-active', '')
+          const dock = panel.dock
+          const b = bodyRef.current.getBoundingClientRect()
+          const start = { x: e.clientX, y: e.clientY, size: panel.size[dock] }
+          const vertical = dock === 'bottom' || dock === 'top'
+          const max = (vertical ? b.height : b.width) - 160
+          const move = (ev) => {
+            const delta = vertical ? ev.clientY - start.y : ev.clientX - start.x
+            const sign = dock === 'bottom' || dock === 'right' ? -1 : 1
+            const size = Math.round(Math.min(Math.max(start.size + sign * delta, 120), Math.max(160, max)))
+            setPanelState((p) => Object.assign({}, p, { size: Object.assign({}, p.size, { [dock]: size }) }))
+          }
+          const up = () => { el.removeAttribute('data-active'); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); setPanelState((p) => { store.set('panel', p); return p }) }
+          el.addEventListener('pointermove', move); el.addEventListener('pointerup', up)
+        }
+        // 浮动面板：记住用户拖出来的尺寸
+        useEffect(() => {
+          const el = panelRef.current
+          if (!el || panel.dock !== 'float' || !panel.open || typeof ResizeObserver === 'undefined') return undefined
+          let t = 0
+          const ro = new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => { const w = el.offsetWidth, hh = el.offsetHeight; setPanel((p) => (Math.abs(p.float.w - w) > 2 || Math.abs(p.float.h - hh) > 2 ? { float: Object.assign({}, p.float, { w, h: hh }) } : {})) }, 200) })
+          ro.observe(el)
+          return () => { clearTimeout(t); ro.disconnect() }
+        }, [panel.dock, panel.open, setPanel])
 
         if (!data) return null
-        const mustCount = qa && qa.issues ? qa.issues.filter((i) => i.level === 'must' && !ignored.includes(i.id)).length : null
-        const sideOpen = mode === 'select' || panel === 'qa'
+        const mustCount = qa && qa.issues ? liveIssues.filter((i) => i.level === 'must').length : null
+        const busy = exportState && exportState.busy
+        const frameOk = frame && frame.srcdoc
 
+        // ── 工具栏 ──
         const toolbar = h('div', { className: 'ds-bar' },
-          h('div', { className: 'ds-seg', role: 'radiogroup', 'aria-label': 'viewport' }, VIEWPORTS.map((v) => h('button', { key: v.id, type: 'button', role: 'radio', 'aria-checked': viewport.id === v.id, onClick: () => setVp(v.id) }, tr('vp_' + v.id)))),
-          h('span', { className: 'ds-zoom' }, fmt(tr('zoom'), { n: Math.round(scale * 100) })),
+          h(Menu, {
+            icon: 'monitor', title: tr('viewport'),
+            label: h('span', null, h('span', { className: 'ds-lbl' }, tr('vp_' + viewport.id) + ' '), h('span', { className: 'ds-vp-w' }, viewport.w), h('span', { className: 'ds-zoom' }, ' · ' + Math.round(scale * 100) + '%')),
+            items: VIEWPORTS.map((v) => ({ key: v.id, label: tr('vp_' + v.id), hint: v.w + ' px', checked: v.id === viewport.id, onSelect: () => setVp(v.id) })),
+          }),
+          h('div', { className: 'ds-seg', role: 'radiogroup', 'aria-label': tr('annotate') },
+            h('button', { type: 'button', role: 'radio', 'aria-checked': mode === 'browse', title: tr('browseTip'), 'aria-label': tr('browse'), onClick: () => setMode('browse') }, h(Icon, { name: 'cursor', size: 14 }), h('span', { className: 'ds-lbl' }, tr('browse'))),
+            h('button', { type: 'button', role: 'radio', 'data-annot': '', 'aria-checked': mode === 'select', title: tr('annotateTip'), 'aria-label': tr('annotate'), onClick: () => setMode('select') }, h(Icon, { name: 'note', size: 14 }), h('span', { className: 'ds-lbl' }, tr('annotate')))),
           h('span', { className: 'ds-sp' }),
-          h('div', { className: 'ds-seg', role: 'radiogroup', 'aria-label': 'mode' },
-            h('button', { type: 'button', role: 'radio', 'aria-checked': mode === 'browse', onClick: () => setMode('browse') }, tr('browse')),
-            h('button', { type: 'button', role: 'radio', 'aria-checked': mode === 'select', onClick: () => { setMode('select'); setPanel('none') } }, tr('select'))),
-          h('button', { type: 'button', className: 'ds-btn', disabled: qaBusy || !frame || !frame.url, onClick: () => (panel === 'qa' && qa && !qaBusy ? setPanel('none') : doQa()) },
-            qaBusy ? tr('qaRunning') : tr('qa'), mustCount !== null ? h('span', { className: 'ds-badge', 'data-ok': mustCount === 0 ? '' : undefined }, String(mustCount)) : null),
-          h('button', { type: 'button', className: 'ds-btn', 'data-primary': '', disabled: (exportState && exportState.busy) || !frame || !frame.url, onClick: () => doExport(false) }, exportState && exportState.busy ? tr('exporting') : tr('export')))
+          h('button', { type: 'button', className: 'ds-btn', title: tr('qaTip'), 'aria-pressed': panel.open && panel.tab === 'qa', disabled: qaBusy || !frameOk || !ready, onClick: () => (qa && !qaBusy ? setPanel((p) => (p.open && p.tab === 'qa' ? { open: false } : { open: true, tab: 'qa' })) : doQa()) },
+            h(Icon, { name: 'shield' }), qaBusy ? tr('qaRunning') : tr('qa'), mustCount !== null ? h('span', { className: 'ds-badge', 'data-ok': mustCount === 0 ? '' : undefined }, mustCount === 0 ? '✓' : String(mustCount)) : null),
+          h('button', { type: 'button', className: 'ds-btn ds-icon', title: tr('panelTip'), 'aria-label': tr('panel'), 'aria-pressed': panel.open, onClick: () => setPanel((p) => ({ open: !p.open })), style: notes.length ? { width: 'auto', padding: '0 7px' } : undefined },
+            h(Icon, { name: 'dock_' + panel.dock }), notes.length ? h('span', { className: 'ds-badge', 'data-neutral': '' }, String(notes.length)) : null),
+          h(Menu, {
+            primary: true, align: 'right', icon: 'download', label: busy ? tr('exporting') : tr('exportBtn'), disabled: busy || !frameOk,
+            items: [
+              { key: 'pdf', icon: 'download', label: tr('exportPdf'), onSelect: () => doExport(false) },
+              { key: 'html', icon: 'note', label: tr('exportHtml'), hint: String(notes.length), disabled: !notes.length, onSelect: doExportHtml },
+            ],
+          }))
 
-        const banner = exportState && (exportState.confirm || exportState.done || exportState.error) ? h('div', { className: 'ds-banner', 'data-ok': exportState.done ? '' : undefined },
-          exportState.confirm ? [
-            h('b', { key: 't' }, fmt(tr('confirmTitle'), { n: exportState.confirm })), h('span', { key: 'b', className: 'ds-muted' }, tr('confirmBody')),
-            h('div', { key: 'r', className: 'ds-row' },
-              h('button', { type: 'button', className: 'ds-btn', onClick: () => { setPanel('qa'); setMode('browse') } }, tr('viewIssues')),
-              h('button', { type: 'button', className: 'ds-btn', 'data-primary': '', onClick: () => doExport(true) }, tr('exportAnyway')),
-              h('button', { type: 'button', className: 'ds-link', onClick: () => setExportState(null) }, tr('cancel')))] : null,
-          exportState.done ? h('div', { className: 'ds-row' }, h('span', null, fmt(tr('exported'), { name: exportState.done.pdfPath.split(/[\\/]/).pop(), pages: exportState.done.pages })), h('button', { type: 'button', className: 'ds-btn', onClick: () => openPdf(exportState.done.pdfPath) }, tr('openPdf')), h('button', { type: 'button', className: 'ds-link', onClick: () => setExportState(null) }, '×')) : null,
-          exportState.error ? h('div', { className: 'ds-row' }, h('span', { className: 'ds-status', 'data-bad': '', style: { padding: 0 } }, fmt(tr('exportFail'), { e: exportState.error })), h('button', { type: 'button', className: 'ds-link', onClick: () => setExportState(null) }, '×')) : null) : null
+        const es = exportState
+        const banner = es && (es.confirm || es.done || es.error) ? h('div', { className: 'ds-banner', 'data-tone': es.error ? 'bad' : es.confirm ? 'warn' : 'ok', role: 'status' },
+          es.confirm ? [
+            h('b', { key: 't' }, tr('confirmTitle', { n: es.confirm })), h('span', { key: 's', className: 'ds-sp' }),
+            h('button', { key: 'v', type: 'button', className: 'ds-btn', onClick: () => { setPanel({ open: true, tab: 'qa' }); setMustOnly(true); setExportState(null) } }, tr('viewIssues')),
+            h('button', { key: 'a', type: 'button', className: 'ds-btn ds-primary', onClick: () => doExport(true) }, tr('exportAnyway'))] : null,
+          es.done ? [
+            h('span', { key: 't' }, es.kind === 'html' ? tr('htmlExported', { name: es.done.path.split(/[\\/]/).pop(), n: es.done.notes }) : tr('exported', { name: es.done.pdfPath.split(/[\\/]/).pop(), pages: es.done.pages })), h('span', { key: 's', className: 'ds-sp' }),
+            h('button', { key: 'o', type: 'button', className: 'ds-btn', onClick: () => openFile(es.kind === 'html' ? es.done.path : es.done.pdfPath) }, tr('open'))] : null,
+          es.error ? [h('span', { key: 't', className: 'ds-status', 'data-bad': '', style: { padding: 0 } }, tr('exportFail', { e: es.error })), h('span', { key: 's', className: 'ds-sp' })] : null,
+          h('button', { type: 'button', className: 'ds-btn ds-ghost ds-icon', 'aria-label': tr('cancel'), onClick: () => setExportState(null) }, h(Icon, { name: 'close', size: 14 }))) : null
 
-        const stage = h('div', { className: 'ds-stage', ref: stageRef },
+        // ── 预览舞台 ──
+        const stage = h('div', { className: 'ds-stage', ref: stageRef, key: 'stage' },
           !frame ? h('div', { className: 'ds-status' }, tr('loading')) :
-            frame.error ? h('div', { className: 'ds-status', 'data-bad': '' }, fmt(tr('failed'), { e: frame.error })) :
+            frame.error ? h('div', { className: 'ds-status', 'data-bad': '' }, tr('failed', { e: frame.error })) :
               h('div', { style: { width: viewport.w * scale, height: frameH * scale, margin: '12px auto' } },
                 h('div', { className: 'ds-canvas', style: { width: viewport.w, height: frameH, transform: 'scale(' + scale + ')' } },
-                  h('iframe', { ref: frameRef, key: frame.url + viewport.id, className: 'ds-frame', src: frame.url, sandbox: 'allow-scripts', title: tr('title'), style: { width: viewport.w, height: frameH } }))))
+                  h('iframe', { ref: frameRef, key: frame.id + ':' + viewport.id, className: 'ds-frame', srcDoc: frame.srcdoc, sandbox: 'allow-scripts', title: tr('title'), style: { width: viewport.w, height: frameH } }))))
 
-        const selectPanel = mode === 'select' ? h('div', { className: 'ds-sec' },
-          h('h4', null, selection.length ? fmt(tr('selected'), { n: selection.length }) : tr('select')),
-          !selection.length ? h('div', { className: 'ds-muted' }, tr('pickHint')) : selection.map((s) => h('div', { key: s.selector, className: 'ds-kv' },
+        // ── 批注气泡（就地输入，不占用面板）──
+        let composer = null
+        if (mode === 'select' && selection.length && anchor && frameRef.current && bodyRef.current) {
+          const fr = frameRef.current.getBoundingClientRect()
+          const br = bodyRef.current.getBoundingClientRect()
+          const ax = fr.left - br.left + anchor.x * scale
+          const ay = fr.top - br.top + anchor.y * scale
+          const ah = anchor.h * scale
+          const W = Math.min(288, br.width - 16), H = 196
+          // 优先放在所选元素上方：紧随其后的内容（下一段、下一行）保持可点，方便 Shift 连选
+          let top = ay - H - 8
+          if (top < 8) top = ay + ah + 8
+          top = Math.min(Math.max(8, top), Math.max(8, br.height - H - 8))
+          const left = Math.min(Math.max(8, ax), Math.max(8, br.width - W - 8))
+          const s0 = selection[selection.length - 1]
+          composer = h('div', { className: 'ds-composer', role: 'dialog', 'aria-label': tr('annotate'), 'data-pass': shiftHeld ? '' : undefined, style: { left, top, width: W } },
+            h('div', { className: 'ds-composer-h' },
+              h('span', { className: 'ds-target', title: s0.selector }, h('code', null, s0.tag), ' ', (s0.text || '').slice(0, 40), selection.length > 1 ? ' ' + tr('more', { n: selection.length - 1 }) : ''),
+              h('button', { type: 'button', className: 'ds-act', 'aria-label': tr('cancel'), onClick: closeComposer }, h(Icon, { name: 'close', size: 14 }))),
+            h('textarea', {
+              className: 'ds-input', rows: 3, value: draft, placeholder: tr('commentPh') + ' · Ctrl+Enter', autoFocus: true, ref: composerRef,
+              onChange: (e) => setDraftText(e.target.value),
+              // 输入框为空时按住 Shift = 准备多选：气泡变半透明并让点击穿透到预览
+              onKeyUp: (e) => { if (e.key === 'Shift') setShiftHeld(false) },
+              onBlur: () => setShiftHeld(false),
+              onKeyDown: (e) => { if (e.key === 'Shift' && !e.repeat && !draft.trim()) setShiftHeld(true); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addNote() } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeComposer() } },
+            }),
+            h('div', { className: 'ds-row' },
+              h('div', { className: 'ds-dots', role: 'radiogroup', 'aria-label': tr('color') }, COLORS.map((c) => h('button', { key: c, type: 'button', role: 'radio', className: 'ds-dot', 'aria-checked': draftColor === c, 'aria-label': c, style: { background: c }, onClick: () => setDraftColor(c) }))),
+              h('span', { className: 'ds-sp' }),
+              !me.named || nickEdit
+                ? h('label', { className: 'ds-nick' }, h('input', { className: 'ds-input', placeholder: tr('nickPh'), defaultValue: me.name, 'aria-label': tr('nick'), onBlur: (e) => commitNick(e.target.value), onKeyDown: (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur() } } }))
+                : h('button', { type: 'button', className: 'ds-chip', title: tr('nickEdit'), onClick: () => setNickEdit(true) }, names[me.id], ' ✎')),
+            h('div', { className: 'ds-row' },
+              h('span', { className: 'ds-muted' }, tr('multiHint')),
+              h('span', { className: 'ds-sp' }),
+              h('button', { type: 'button', className: 'ds-btn ds-primary', disabled: !draft.trim(), onClick: addNote }, tr('add'))))
+        }
+
+        // ── 面板：批注 ──
+        const notesTab = () => {
+          if (!notes.length) return h('div', { className: 'ds-empty' }, h('b', null, tr('notesEmpty')), h('span', null, tr('notesEmptyHint')),
+            mode !== 'select' ? h('button', { type: 'button', className: 'ds-btn', onClick: () => setMode('select') }, h(Icon, { name: 'note' }), tr('startAnnotate')) : null)
+          return h(React.Fragment, null,
+            h('div', { className: 'ds-tools' },
+              h('button', { type: 'button', className: 'ds-btn ds-primary', onClick: sendNotes }, h(Icon, { name: 'send', size: 14 }), tr('sendAll'), h('span', { className: 'ds-zoom', style: { color: 'inherit', opacity: 0.7 } }, String(notes.length))),
+              h('button', { type: 'button', className: 'ds-btn', onClick: doExportHtml, disabled: busy }, h(Icon, { name: 'download', size: 14 }), tr('exportHtml')),
+              h('span', { className: 'ds-sp' }),
+              h(ConfirmButton, { label: tr('clear'), confirm: tr('clearConfirm'), onConfirm: clearNotes })),
+            h('div', { className: 'ds-grid', style: panel.dock === 'left' || panel.dock === 'right' ? { gridTemplateColumns: '1fr' } : undefined },
+              notes.map((n) => h(NoteCard, { key: n.id, n, names, focused: focusNote === n.id, onFocus: () => setFocusNote(n.id), onLocate: () => locateNote(n), onRemove: () => removeNote(n.id), onPatch: (p) => patchNote(n.id, p), onReply: (t) => addReply(n.id, t) }))))
+        }
+
+        // ── 面板：QA（按类别分组，可筛选）──
+        const qaTab = () => {
+          if (qaBusy) return h('div', { className: 'ds-empty' }, h('b', null, tr('qaRunning')))
+          if (!qa) return h('div', { className: 'ds-empty' }, h('b', null, tr('qaNotRun')), h('button', { type: 'button', className: 'ds-btn ds-primary', disabled: !ready, onClick: doQa }, h(Icon, { name: 'shield' }), tr('qaStart')))
+          if (qa.error) return h('div', { className: 'ds-empty' }, h('span', { className: 'ds-status', 'data-bad': '' }, tr('qaError', { e: qa.error })), h('button', { type: 'button', className: 'ds-btn', onClick: doQa }, tr('qaRerun')))
+          const st = qa.stats || {}
+          const counts = {}
+          for (const i of liveIssues) { const c = counts[i.cat] || (counts[i.cat] = { n: 0, must: 0 }); c.n++; if (i.level === 'must') c.must++ }
+          const cats = CATS.filter((c) => counts[c]).concat(Object.keys(counts).filter((c) => !CATS.includes(c)))
+          const must = liveIssues.filter((i) => i.level === 'must').length
+          const head = h('div', { className: 'ds-tools' },
+            must ? h('span', { className: 'ds-pill', 'data-level': 'must' }, tr('mustN', { n: must })) : null,
+            liveIssues.length - must ? h('span', { className: 'ds-pill', 'data-level': 'hint' }, tr('hintN', { n: liveIssues.length - must })) : null,
+            h('span', { className: 'ds-muted' }, tr('stats', { cjk: st.cjk || 0, words: st.words || 0, fig: st.figures || 0, tab: st.tables || 0 }) + (st.pages ? tr('statsPages', { pages: st.pages }) : '')),
+            h('span', { className: 'ds-sp' }),
+            h('button', { type: 'button', className: 'ds-btn ds-ghost', onClick: doQa }, h(Icon, { name: 'refresh', size: 14 }), tr('qaRerun')),
+            shownIssues.length ? h('button', { type: 'button', className: 'ds-btn', onClick: sendAllIssues }, h(Icon, { name: 'send', size: 14 }), tr('allToAgent')) : null)
+          if (!liveIssues.length) return h(React.Fragment, null, head, h('div', { className: 'ds-empty' }, h('b', null, '✓ ' + tr('qaEmpty')), ignored.length ? h('button', { type: 'button', className: 'ds-link', onClick: () => setIgnored([]) }, tr('ignored', { n: ignored.length }) + ' · ' + tr('restore')) : null))
+          const filters = h('div', { className: 'ds-tools', role: 'toolbar' },
+            h('button', { type: 'button', className: 'ds-chip', 'aria-pressed': qaCat === 'all', onClick: () => setQaCat('all') }, tr('all'), h('span', { className: 'ds-cnt' }, String(liveIssues.length))),
+            cats.map((c) => h('button', { key: c, type: 'button', className: 'ds-chip', 'aria-pressed': qaCat === c, title: tr('catd_' + c), onClick: () => setQaCat(qaCat === c ? 'all' : c) }, counts[c].must ? h('span', { className: 'ds-mdot' }) : null, tr('cat_' + c), h('span', { className: 'ds-cnt' }, String(counts[c].n)))),
+            h('span', { className: 'ds-sp' }),
+            h('button', { type: 'button', className: 'ds-chip', 'aria-pressed': mustOnly, onClick: () => setMustOnly((v) => !v) }, tr('mustOnly')))
+          const groups = (qaCat === 'all' ? cats : [qaCat]).map((c) => {
+            const items = shownIssues.filter((i) => i.cat === c).sort((a, b) => (a.level === b.level ? 0 : a.level === 'must' ? -1 : 1))
+            if (!items.length) return null
+            const isOpen = !collapsed[c]
+            const m = items.filter((i) => i.level === 'must').length
+            return h('div', { key: c, className: 'ds-group' },
+              h('button', { type: 'button', className: 'ds-group-h', 'aria-expanded': isOpen, onClick: () => setCollapsed((x) => Object.assign({}, x, { [c]: isOpen })) },
+                h(Icon, { name: 'chevron', size: 14 }), h('b', null, tr('cat_' + c)), h('span', { className: 'ds-muted' }, tr('catd_' + c)), h('span', { className: 'ds-sp' }),
+                m ? h('span', { className: 'ds-pill', 'data-level': 'must' }, String(m)) : null,
+                items.length - m ? h('span', { className: 'ds-pill', 'data-level': 'hint' }, String(items.length - m)) : null),
+              isOpen ? items.map((i) => h('div', { key: i.id, className: 'ds-issue', 'data-open': openIssue === i.id ? '' : undefined },
+                h('span', { className: 'ds-pill', 'data-level': i.level }, i.level === 'must' ? tr('must') : tr('hint')),
+                h('div', { className: 'ds-issue-main', onClick: () => setOpenIssue(openIssue === i.id ? null : i.id), title: i.fix ? '→ ' + i.fix : '' },
+                  h('span', { className: 'ds-issue-t' }, i.title),
+                  i.detail ? h('span', { className: 'ds-issue-d' }, i.detail) : null,
+                  openIssue === i.id && i.fix ? h('span', { className: 'ds-issue-d' }, '→ ' + i.fix) : null),
+                h('div', { className: 'ds-acts' },
+                  i.selector ? h('button', { type: 'button', className: 'ds-act', title: tr('locate'), 'aria-label': tr('locate'), onClick: () => send({ type: 'locate', selector: i.selector }) }, h(Icon, { name: 'locate', size: 14 })) : null,
+                  h('button', { type: 'button', className: 'ds-act', title: tr('toNote'), 'aria-label': tr('toNote'), onClick: () => issueToNote(i) }, h(Icon, { name: 'note', size: 14 })),
+                  h('button', { type: 'button', className: 'ds-act', title: tr('ignore'), 'aria-label': tr('ignore'), onClick: () => setIgnored((x) => x.concat([i.id])) }, h(Icon, { name: 'minus', size: 14 }))))) : null)
+          })
+          return h(React.Fragment, null, head, filters, groups,
+            ignored.length ? h('button', { type: 'button', className: 'ds-link', onClick: () => setIgnored([]) }, tr('ignored', { n: ignored.length }) + ' · ' + tr('restore')) : null)
+        }
+
+        // ── 面板：元素 ──
+        const elTab = () => {
+          if (!selection.length) return h('div', { className: 'ds-empty' }, h('b', null, tr('elEmpty')), h('span', null, tr('elHint')))
+          return selection.map((s) => h('div', { key: s.selector, className: 'ds-kv' },
             h('span', null, tr('selector')), h('span', { className: 'ds-code' }, s.selector),
-            h('span', null, tr('text')), h('span', null, (s.text || '').slice(0, 120)),
-            h('span', null, tr('styles')), h('span', null,
-              h('span', { className: 'ds-swatch', style: { background: s.styles.color } }), s.styles.fontSize + ' · ' + s.styles.fontWeight + ' · ' + s.styles.fontFamily,
-              s.styles.background && s.styles.background !== 'rgba(0, 0, 0, 0)' ? h('span', null, ' · ', h('span', { className: 'ds-swatch', style: { background: s.styles.background } }), s.styles.background) : null),
-            h('span', null, '尺寸'), h('span', null, s.rect.w + '×' + s.rect.h + ' · 内边距 ' + s.styles.padding))),
-          selection.length ? h('textarea', { className: 'ds-input', rows: 3, value: comment, placeholder: tr('commentPh'), onChange: (e) => setComment(e.target.value), onKeyDown: (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addNote() } }) : null,
-          selection.length ? h('div', { className: 'ds-row' }, h('button', { type: 'button', className: 'ds-btn', 'data-primary': '', disabled: !comment.trim(), onClick: addNote }, tr('addNote'))) : null) : null
+            h('span', null, tr('text')), h('span', null, (s.text || '').slice(0, 160)),
+            h('span', null, tr('font')), h('span', null, s.styles.fontSize + ' · ' + s.styles.fontWeight + ' · ' + s.styles.fontFamily + ' · ' + s.styles.lineHeight),
+            h('span', null, tr('color')), h('span', null, h('span', { className: 'ds-swatch', style: { background: s.styles.color } }), s.styles.color,
+              s.styles.background && s.styles.background !== 'rgba(0, 0, 0, 0)' ? h('span', null, '  ', h('span', { className: 'ds-swatch', style: { background: s.styles.background } }), s.styles.background) : null),
+            h('span', null, tr('size')), h('span', null, s.rect.w + ' × ' + s.rect.h),
+            h('span', null, tr('padding')), h('span', null, s.styles.padding)))
+        }
 
-        const qaPanel = panel === 'qa' ? h('div', { className: 'ds-sec' },
-          h('h4', null, tr('qaTitle'), qa && qa.stats ? h('span', { className: 'ds-chip' }, fmt(tr('qaStats'), { cjk: qa.stats.cjk || 0, words: qa.stats.words || 0, fig: qa.stats.figures || 0, tab: qa.stats.tables || 0, pages: qa.stats.pages || 0 })) : null),
-          qaBusy ? h('div', { className: 'ds-muted' }, tr('qaRunning')) : qa && qa.error ? h('div', { className: 'ds-status', 'data-bad': '' }, qa.error) :
-            !visibleIssues.length ? h('div', { className: 'ds-muted' }, tr('qaEmpty')) :
-              h('div', null, visibleIssues.map((i) => h('div', { key: i.id, className: 'ds-issue' },
-                h('span', { className: 'ds-dot', 'data-level': i.level }),
-                h('div', null, h('div', { className: 'ds-issue-title' }, i.title), h('div', { className: 'ds-muted' }, h('span', { className: 'ds-chip' }, tr('cat_' + i.cat)), ' ', i.detail), i.fix ? h('div', { className: 'ds-muted' }, '→ ' + i.fix) : null),
-                h('div', { className: 'ds-issue-actions' },
-                  i.selector ? h('button', { type: 'button', className: 'ds-link', onClick: () => send({ type: 'locate', selector: i.selector }) }, tr('locate')) : null,
-                  h('button', { type: 'button', className: 'ds-link', onClick: () => issueToNote(i) }, tr('toAgent')),
-                  h('button', { type: 'button', className: 'ds-link', onClick: () => setIgnored((x) => x.concat([i.id])) }, tr('ignore')))))),
-          visibleIssues.length ? h('div', { className: 'ds-row' }, h('button', { type: 'button', className: 'ds-btn', onClick: sendAllIssues }, tr('allToAgent'))) : null) : null
+        const tabs = [['notes', tr('tab_notes'), notes.length ? h('span', { className: 'ds-badge', 'data-neutral': '' }, String(notes.length)) : null],
+          ['qa', tr('tab_qa'), mustCount ? h('span', { className: 'ds-badge' }, String(mustCount)) : null],
+          ['el', tr('tab_el'), selection.length ? h('span', { className: 'ds-badge', 'data-neutral': '' }, String(selection.length)) : null]]
+        const dock = panel.dock
+        const bw = bodyRef.current ? bodyRef.current.clientWidth : 800
+        const bh = bodyRef.current ? bodyRef.current.clientHeight : 600
+        const panelStyle = dock === 'float'
+          ? { left: panel.float.x == null ? Math.max(8, bw - Math.min(panel.float.w, bw - 16) - 12) : Math.min(panel.float.x, Math.max(0, bw - 120)), top: panel.float.y == null ? Math.max(8, bh - Math.min(panel.float.h, bh - 16) - 12) : Math.min(panel.float.y, Math.max(0, bh - 40)), width: Math.min(panel.float.w, bw - 8), height: Math.min(panel.float.h, bh - 8) }
+          : dock === 'bottom' || dock === 'top' ? { height: Math.min(panel.size[dock], Math.max(140, bh - 140)) } : { width: Math.min(panel.size[dock], Math.max(220, bw * 0.6)) }
+        const panelEl = panel.open ? h('section', { key: 'panel', ref: panelRef, className: 'ds-panel', 'data-dock': dock, style: panelStyle, 'aria-label': tr('panel') },
+          h('div', { className: 'ds-ph', onPointerDown: onHeadDown, title: tr('dragHint') },
+            h('span', { className: 'ds-grip' }, h(Icon, { name: 'grip', size: 14 })),
+            h('div', { className: 'ds-tabs', role: 'tablist' }, tabs.map(([id, label, badge]) => h('button', { key: id, type: 'button', role: 'tab', className: 'ds-tab', 'aria-selected': panel.tab === id, onClick: () => { setPanel({ tab: id }); if (id === 'qa' && !qa && !qaBusy && ready) doQa() } }, label, badge))),
+            h('span', { className: 'ds-sp' }),
+            h(Menu, { align: 'right', icon: 'dock_' + dock, label: null, title: tr('dockMenu'), className: 'ds-dockmenu', items: DOCKS.map((d) => ({ key: d, label: tr('dock_' + d), icon: 'dock_' + d, checked: d === dock ? true : undefined, onSelect: () => setPanel({ dock: d }) })) }),
+            h('button', { type: 'button', className: 'ds-btn ds-ghost ds-icon', title: tr('hidePanel'), 'aria-label': tr('hidePanel'), onClick: () => setPanel({ open: false }) }, h(Icon, { name: 'close', size: 14 }))),
+          h('div', { className: 'ds-pb', role: 'tabpanel' }, panel.tab === 'qa' ? qaTab() : panel.tab === 'el' ? elTab() : notesTab())) : null
 
-        const tray = h('div', { className: 'ds-tray' },
-          h('div', { className: 'ds-tray-head' }, h('b', null, tr('tray')), h('span', { className: 'ds-sp' }),
-            toast ? h('span', { className: 'ds-muted' }, toast) : null,
-            notes.length ? h('button', { type: 'button', className: 'ds-link', onClick: () => setNotes([]) }, tr('clearAll')) : null,
-            h('button', { type: 'button', className: 'ds-btn', 'data-primary': '', disabled: !notes.length, onClick: sendNotes }, fmt(tr('sendAll'), { n: notes.length }))),
-          notes.length ? notes.map((n, i) => h('div', { key: n.id, className: 'ds-note' },
-            h('span', { className: 'ds-num' }, CIRCLED[i] || String(i + 1)),
-            h('div', { className: 'ds-note-body' }, h('span', null, n.comment), h('span', { className: 'ds-code ds-muted' }, n.targets.map((t) => t.selector).join('  ·  '))),
-            n.targets[0] ? h('button', { type: 'button', className: 'ds-link', onClick: () => send({ type: 'locate', selector: n.targets[0].selector }) }, tr('locate')) : null,
-            h('button', { type: 'button', className: 'ds-link', onClick: () => setNotes((x) => x.filter((y) => y.id !== n.id)) }, tr('remove')))) :
-            h('div', { className: 'ds-muted' }, tr('trayEmpty')))
+        // 拖动中的停靠预览
+        let dragLayer = null
+        if (drag) {
+          const z = drag.zone
+          const zs = z === 'bottom' ? { left: 6, right: 6, bottom: 6, height: Math.min(panel.size.bottom, bh * 0.45) } : z === 'top' ? { left: 6, right: 6, top: 6, height: Math.min(panel.size.top, bh * 0.45) } : z === 'left' ? { left: 6, top: 6, bottom: 6, width: Math.min(panel.size.left, bw * 0.5) } : z === 'right' ? { right: 6, top: 6, bottom: 6, width: Math.min(panel.size.right, bw * 0.5) } : null
+          dragLayer = [zs ? h('div', { key: 'z', className: 'ds-zone', style: zs }) : h('div', { key: 'g', className: 'ds-dragbox', style: { left: drag.x, top: drag.y, width: drag.w, height: drag.h } }), h('div', { key: 'h', className: 'ds-draghint' }, tr('dragHint'))]
+        }
 
-        return h('div', { className: 'ds-root', ref: rootRef, 'data-deliver-studio': '' },
+        return h('div', { className: 'ds-root', ref: rootRef, 'data-deliver-studio': '', 'data-dragging': drag ? '' : undefined, onKeyDown: (e) => { if (e.key !== 'Escape' || e.defaultPrevented || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return; if (selection.length) { setSelection([]); setAnchor(null); send({ type: 'clear' }) } else if (mode === 'select') setMode('browse') } },
           toolbar, banner,
-          h('div', { className: 'ds-main', 'data-narrow': narrow ? '' : undefined }, stage, sideOpen ? h('div', { className: 'ds-side' }, selectPanel, qaPanel) : null),
-          tray)
+          h('div', { className: 'ds-body', ref: bodyRef, 'data-dock': dock === 'float' ? 'bottom' : dock },
+            stage,
+            panel.open && dock !== 'float' ? h('div', { key: 'split', className: 'ds-split', role: 'separator', 'aria-orientation': dock === 'left' || dock === 'right' ? 'vertical' : 'horizontal', onPointerDown: onSplitDown }) : null,
+            panelEl, composer, dragLayer,
+            toast ? h('div', { className: 'ds-toast', role: 'status' }, toast) : null))
       }
+    }
+
+    // 二次确认按钮（清空等破坏性操作）
+    function ConfirmButton({ label, confirm, onConfirm }) {
+      const [armed, setArmed] = useState(false)
+      useEffect(() => { if (!armed) return undefined; const t = setTimeout(() => setArmed(false), 3000); return () => clearTimeout(t) }, [armed])
+      return h('button', { type: 'button', className: 'ds-btn ds-ghost', style: armed ? { color: 'var(--dsw-alias-state-error-primary)' } : undefined, onClick: () => { if (armed) { setArmed(false); onConfirm() } else setArmed(true) } }, h(Icon, { name: 'trash', size: 14 }), armed ? confirm : label)
+    }
+
+    // 批注卡片：双击改名 / 编辑内容，改颜色、回复、定位、删除
+    function NoteCard({ n, names, focused, onFocus, onLocate, onRemove, onPatch, onReply }) {
+      const [renaming, setRenaming] = useState(false)
+      const [editing, setEditing] = useState(false)
+      const [colors, setColors] = useState(false)
+      const [replying, setReplying] = useState(false)
+      const [text, setText] = useState('')
+      const ref = useRef(null)
+      useEffect(() => { if (focused && ref.current) ref.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) }, [focused])
+      return h('div', { ref, className: 'ds-card', 'data-focus': focused ? '' : undefined, onClick: onFocus },
+        h('div', { className: 'ds-card-h' },
+          renaming
+            ? h('input', { className: 'ds-pin-in', autoFocus: true, defaultValue: n.name, maxLength: 24, 'aria-label': tr('rename'), onBlur: (e) => { const v = e.target.value.trim(); if (v && v !== n.name) onPatch({ name: v }); setRenaming(false) }, onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') setRenaming(false) } })
+            : h('button', { type: 'button', className: 'ds-pin', title: tr('rename'), style: { background: n.color, color: onColor(n.color) }, onDoubleClick: () => setRenaming(true), onClick: () => setColors((v) => !v) }, n.name || '·'),
+          h('span', { className: 'ds-meta' }, (names[n.author && n.author.id] || '') + ' · ' + when(n.time)),
+          h('div', { className: 'ds-acts' },
+            n.targets[0] ? h('button', { type: 'button', className: 'ds-act', title: tr('locate'), 'aria-label': tr('locate'), onClick: (e) => { e.stopPropagation(); onLocate() } }, h(Icon, { name: 'locate', size: 14 })) : null,
+            h('button', { type: 'button', className: 'ds-act', title: tr('reply'), 'aria-label': tr('reply'), onClick: () => setReplying(true) }, h(Icon, { name: 'reply', size: 14 })),
+            h('button', { type: 'button', className: 'ds-act', 'data-danger': '', title: tr('remove'), 'aria-label': tr('remove'), onClick: (e) => { e.stopPropagation(); onRemove() } }, h(Icon, { name: 'trash', size: 14 })))),
+        colors ? h('div', { className: 'ds-dots', role: 'radiogroup', 'aria-label': tr('color') }, COLORS.map((c) => h('button', { key: c, type: 'button', role: 'radio', className: 'ds-dot', 'aria-checked': n.color === c, 'aria-label': c, style: { background: c }, onClick: () => { onPatch({ color: c }); setColors(false) } })), h('button', { type: 'button', className: 'ds-link', style: { marginLeft: 6 }, onClick: () => { setColors(false); setRenaming(true) } }, tr('renameShort'))) : null,
+        editing
+          ? h('textarea', { className: 'ds-input', rows: 3, autoFocus: true, defaultValue: n.comment, onBlur: (e) => { const v = e.target.value.trim(); if (v && v !== n.comment) onPatch({ comment: v }); setEditing(false) }, onKeyDown: (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) e.target.blur(); if (e.key === 'Escape') setEditing(false) } })
+          : h('div', { className: 'ds-comment', title: tr('editComment'), onDoubleClick: () => setEditing(true) }, n.comment),
+        n.replies.map((r) => h('div', { key: r.id, className: 'ds-reply' }, h('span', { className: 'ds-meta' }, (names[r.author && r.author.id] || '') + ' · ' + when(r.time)), h('span', { className: 'ds-comment' }, r.text))),
+        replying ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          h('textarea', { className: 'ds-input', rows: 2, autoFocus: true, value: text, placeholder: tr('replyPh') + ' · Ctrl+Enter', onChange: (e) => setText(e.target.value), onKeyDown: (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { if (onReply(text)) { setText(''); setReplying(false) } } if (e.key === 'Escape') setReplying(false) } }),
+          h('div', { className: 'ds-row' }, h('span', { className: 'ds-sp' }), h('button', { type: 'button', className: 'ds-btn ds-ghost', onClick: () => setReplying(false) }, tr('cancel')), h('button', { type: 'button', className: 'ds-btn ds-primary', disabled: !text.trim(), onClick: () => { if (onReply(text)) { setText(''); setReplying(false) } } }, tr('reply')))) : null)
     }
 
     // ── 设置页 ─────────────────────────────────────────
@@ -440,8 +988,8 @@ window.__ModuleLoader__.load({
       }
       const field = (label, input) => h('label', { className: 'ds-field' }, h('span', null, label), input)
       const browser = d.browser || {}
-      return h('div', { className: 'ds-page' }, h('div', { className: 'ds-card' },
-        field(tr('sViewport'), h('select', { className: 'ds-input', value: draft.defaultViewport, onChange: set('defaultViewport') }, VIEWPORTS.map((v) => h('option', { key: v.id, value: v.id }, tr('vp_' + v.id))))),
+      return h('div', { className: 'ds-page ds-root', style: { height: 'auto', minHeight: 0, background: 'transparent' } }, h('div', { className: 'ds-scard' },
+        field(tr('sViewport'), h('select', { className: 'ds-input', value: draft.defaultViewport, onChange: set('defaultViewport') }, VIEWPORTS.map((v) => h('option', { key: v.id, value: v.id }, tr('vp_' + v.id) + ' ' + v.w)))),
         h('label', { className: 'ds-row' }, h('input', { type: 'checkbox', role: 'switch', 'aria-checked': !!draft.qaBeforeExport, checked: !!draft.qaBeforeExport, onChange: set('qaBeforeExport') }), h('span', null, tr('sQaBefore'))),
         field(tr('sBanned'), h('textarea', { className: 'ds-input', rows: 6, value: draft.bannedWords, onChange: set('bannedWords') })),
         field(tr('sTarget'), h('input', { className: 'ds-input', type: 'number', min: 0, value: draft.targetChars, onChange: set('targetChars') })),
@@ -449,13 +997,13 @@ window.__ModuleLoader__.load({
         browser.found
           ? h('div', { className: 'ds-field' }, h('span', { className: 'ds-muted' }, tr('browserOk', { name: browser.name })), h('span', { className: 'ds-code ds-muted' }, browser.path))
           : h('div', { className: 'ds-field' }, h('span', { className: 'ds-status', 'data-bad': '', style: { padding: 0 } }, tr('browserMissing')), h('span', { className: 'ds-muted' }, tr('browserMissingHint'))),
-        h('div', { className: 'ds-row' }, h('button', { type: 'button', className: 'ds-btn', 'data-primary': '', disabled: status === 'saving', onClick: save }, tr('save')),
+        h('div', { className: 'ds-row' }, h('button', { type: 'button', className: 'ds-btn ds-primary', disabled: status === 'saving', onClick: save }, tr('save')),
           status === 'saved' ? h('span', { className: 'ds-muted' }, tr('saved')) : status.startsWith('fail:') ? h('span', { className: 'ds-status', 'data-bad': '', style: { padding: 0 } }, status.slice(5)) : null)))
     }
     function RowConfig(props) { return props && props.view === 'summary' ? tr('summary') : h(SettingsPage) }
 
     return {
-      __test: { packDocument, frameDocument, parseAddress, sessionFileAddress },
+      __test: { packDocument, frameDocument, parseAddress, sessionFileAddress, resolveRelative, mergeNotes, displayNames, splitAnnotations, makeWorkbench, RowConfig },
       name: 'dsh-deliver-studio-client',
       inject: ['slots', 'sessions', 'locale', 'documentPreviews'],
       apply(ctx) {
@@ -489,5 +1037,3 @@ window.__ModuleLoader__.load({
     }
   },
 })
-
-
