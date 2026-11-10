@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>样例交付物</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:720px;margin:24px auto;color:#222}figure{margin:16px 0}.box{width:240px;height:90px;background:#e5e7eb}</style></head>
+<body>
+<!-- 通用测试页：故意包含已知问题（图号跳号、禁用字样、加载失败的图片、英文引用缺图），供 harness 与手工检查使用 -->
+<h1>样例交付物</h1>
+<p>这份页面用于自动化测试，故意包含几处已知问题。如图1所示，流程分为三个阶段。</p>
+<figure id="f1"><div class="box"></div><figcaption>图1 流程示意</figcaption></figure>
+<figure id="f3"><div class="box"></div><figcaption>图3 结果对比</figcaption></figure>
+<p>TODO：这里还缺一段结论。</p>
+<p><img src="missing-image.png" alt="缺失的图片" width="240" height="120"></p>
+<p>English references: see Figure 7 for the full pipeline; the numbers are summarised below (Table 1).</p>
+<table><caption>Table 1 Summary</caption><tr><td>alpha</td><td>beta</td></tr></table>
+<p>Inline link reference: see <a href="#f1">Fig. 1</a> above.</p>
+</body></html>

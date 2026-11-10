@@ -1,0 +1,42 @@
+{
+  "name": "dsh-deliver-studio",
+  "version": "0.1.0",
+  "description": "交付工作台：HTML 交付物的视口预览、选择·Ask AI 批注、交付 QA（编号、孤字、溢出、留白、对比度、字数、禁用字样）与本机 Chromium 内核浏览器（Edge / Chrome 等）导出 PDF。",
+  "author": "passenfall",
+  "license": "MIT",
+  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "html", "pdf", "qa"],
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": ["index.js", "browser.js", "runtime.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/browser-find.mjs && node --import ./test/register.mjs test/host-sim.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true }
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

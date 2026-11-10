@@ -1,0 +1,4 @@
+# dsh-deliver-studio：一行；Host 半边 index.js，浏览器半边 ./client（dsh.client 声明）。行名必须等于包名。
+- insert:
+    - id: deliver-studio
+      name: 'dsh-deliver-studio'

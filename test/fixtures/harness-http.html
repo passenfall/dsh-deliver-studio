@@ -1,0 +1,53 @@
+<!doctype html><meta charset="utf-8"><title>harness</title>
+<!-- 通用测试页：由 test/harness-server.mjs 提供，模拟 DSH 的 __ModuleLoader__ 加载 client.js，验证打包 → 沙箱 iframe → runtime → QA 往返 -->
+<script>
+window.React = { createElement(){}, useState(){}, useEffect(){}, useMemo(){}, useRef(){}, useCallback(){} }
+window.__ModuleLoader__ = { load(m) { window.__mod = m.factory((name) => window.React) } }
+</script>
+<script src="/client.js"></script>
+<pre id="out">pending</pre>
+<script>
+(async () => {
+  const out = document.getElementById('out')
+  const log = (o) => { out.textContent = JSON.stringify(o) }
+  try {
+    // ?t=/target/<编码后的绝对路径> 检查任意本地 HTML；不带参数时用内置样例
+    const target = new URLSearchParams(location.search).get('t') || '/fixture/sample.html'
+    const base = target.slice(0, target.lastIndexOf('/') + 1)
+    const data = new Uint8Array(await (await fetch(target)).arrayBuffer())
+    const { packDocument, frameDocument } = window.__mod.__test
+    const reads = []
+    const readRelated = async (address, rel, signal) => {
+      reads.push(rel)
+      try { const r = await fetch(base + rel.split('/').map(encodeURIComponent).join('/')); if (!r.ok) return { ok: false, error: { message: 'HTTP ' + r.status, details: {} } }; return { ok: true, value: { data: new Uint8Array(await r.arrayBuffer()), absolutePath: rel } } }
+      catch (e) { return { ok: false, error: { message: String(e), details: {} } } }
+    }
+    const bundle = await packDocument(data, readRelated, 'dsh-resource://file/session/s1/x.html', new AbortController().signal)
+    const url = URL.createObjectURL(new Blob([frameDocument(bundle)], { type: 'text/html' }))
+    const iframe = document.createElement('iframe')
+    if (!new URLSearchParams(location.search).get('nosb')) iframe.sandbox = 'allow-scripts'; iframe.style.cssText = 'width:1440px;height:900px;border:0'
+    const events = []
+    const result = new Promise((resolve) => {
+      window.addEventListener('message', (e) => {
+        if (e.source !== iframe.contentWindow || !e.data || e.data.__deliverStudio !== true) return
+        events.push(e.data.type)
+        if (e.data.type === 'ready') {
+          iframe.contentWindow.postMessage({ __deliverStudio: true, type: 'mode', mode: 'select' }, '*')
+          iframe.contentWindow.postMessage({ __deliverStudio: true, type: 'qa', id: 'x', options: {} }, '*')
+        }
+        if (e.data.type === 'qa-result') resolve(e.data.result)
+      })
+    })
+    iframe.src = url
+    document.body.appendChild(iframe)
+    const r = await Promise.race([result, new Promise((res) => setTimeout(() => res({ timeout: true }), 15000))])
+    let dbg = {}
+    try { const w = iframe.contentWindow; dbg = { rt: !!w.__deliverRuntime, qa: typeof w.__deliverQA, head: w.document.documentElement.outerHTML.slice(0, 300), scripts: w.document.scripts.length, lastScript: (w.document.scripts[w.document.scripts.length-1]||{}).textContent?.slice(0,80) } } catch (e) { dbg = { err: String(e) } }
+    let parentAccess = 'blocked'
+    try { void iframe.contentWindow.document.body; parentAccess = 'OPEN' } catch (e) {}
+    log({ dbg, reads, packed: bundle.assets.map((a) => a.kind + ':' + a.ref), events, parentAccess, must: r.must, hint: r.hint, stats: r.stats, issues: (r.issues || []).map((i) => i.level + ' ' + i.title), timeout: r.timeout })
+  } catch (e) { log({ error: String(e && e.stack || e) }) }
+})()
+</script>
+
+
