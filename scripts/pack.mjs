@@ -1,9 +1,10 @@
 // 打包发布：node scripts/pack.mjs
 // 产物（dist/）：
 //   dsh-deliver-studio-<版本>.tgz   npm pack 产物（内容 = package.json 的 files）
+//   dsh-deliver-studio.tgz          同一个包的不带版本号副本（插件市场 tarball 字段用 releases/latest/download/ 指向它）
 //   dsh-deliver-studio-<版本>.zip   同样内容，放在 dsh-deliver-studio/ 目录下，解压即可在 DSH 中按文件夹安装
 //   RELEASE_NOTES.md                CHANGELOG.md 中当前版本的段落，用作 GitHub Release 说明
-//   SHA256SUMS.txt                  两个包的校验和
+//   SHA256SUMS.txt                  各个包的校验和
 // 只用 Node 内置模块（zip 用 zlib 的 deflateRaw + crc32 自行写出）。
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname, posix } from 'node:path'
@@ -85,9 +86,12 @@ if (!m) throw new Error(`CHANGELOG.md 里没有 ${pkg.version} 的段落`)
 const notes = `${m[1].trim()}\n\n## 安装\n\n- DSH Web →「插件 → 添加插件」，输入 \`https://github.com/passenfall/dsh-deliver-studio\`；\n- 或下载 \`${base}.zip\` 解压，在「添加插件」里输入解压后的 \`${pkg.name}\` 文件夹的绝对路径。\n\n完整说明见 [README](https://github.com/passenfall/dsh-deliver-studio#readme)。\n`
 writeFileSync(join(dist, 'RELEASE_NOTES.md'), notes, 'utf8')
 
-// 6) 校验和
+// 6) 不带版本号的 tgz：供 releases/latest/download/<名字>.tgz 使用（链接里写死版本号的文件名会在下次发版后 404）
 const tgzName = readdirSync(dist).find((n) => n.endsWith('.tgz'))
-const sums = [tgzName, `${base}.zip`].map((n) => `${createHash('sha256').update(readFileSync(join(dist, n))).digest('hex')}  ${n}`).join('\n') + '\n'
+writeFileSync(join(dist, `${pkg.name}.tgz`), readFileSync(join(dist, tgzName)))
+
+// 7) 校验和
+const sums = [tgzName, `${pkg.name}.tgz`, `${base}.zip`].map((n) => `${createHash('sha256').update(readFileSync(join(dist, n))).digest('hex')}  ${n}`).join('\n') + '\n'
 writeFileSync(join(dist, 'SHA256SUMS.txt'), sums, 'utf8')
 
 console.log(`\n打包完成：${pkg.name} ${pkg.version}（${list.length} 个文件）`)

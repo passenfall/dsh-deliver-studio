@@ -1,6 +1,6 @@
 {
   "name": "dsh-deliver-studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "交付工作台：HTML 交付物的视口预览、就地批注（可导出带批注的 HTML，供他人回答）、分类交付 QA（编号、孤字、溢出、留白、对比度、字数、禁用字样）与本机 Chromium 内核浏览器（Edge / Chrome 等）导出 PDF。",
   "author": "passenfall (https://github.com/passenfall)",
   "license": "MIT",
@@ -18,15 +18,15 @@
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
-  "files": ["index.js", "browser.js", "runtime.js", "viewer.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "CHANGELOG.md", "LICENSE"],
+  "files": ["screenshots.json", "index.js", "browser.js", "runtime.js", "viewer.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "CHANGELOG.md", "LICENSE"],
   "scripts": {
     "build": "node build.mjs",
     "test": "node test/browser-find.mjs && node --import ./test/register.mjs test/host-sim.mjs",
     "test:e2e": "node test/viewer-e2e.mjs && node --import ./test/register.mjs test/ui-e2e.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/schemastery": "^3.0.0 || >=3.18.0-0 <3.18.1-0 || >=3.18.1-0 <3.18.2-0 || >=3.18.2-0 <3.18.3-0 || >=3.18.3-0 <3.18.4-0 || >=3.18.4-0 <3.18.5-0 || >=3.18.5-0 <3.18.6-0 || >=3.18.6-0 <3.18.7-0 || >=3.18.7-0 <3.18.8-0 || >=3.18.8-0 <3.18.9-0 || >=3.18.9-0 <3.18.10-0 || >=3.19.0-0 <3.19.1-0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.2.0 <0.3.0 || >=0.2.0-0 <0.2.1-0 || >=0.2.1-0 <0.2.2-0 || >=0.2.2-0 <0.2.3-0 || >=0.2.3-0 <0.2.4-0 || >=0.2.4-0 <0.2.5-0 || >=0.2.5-0 <0.2.6-0 || >=0.2.6-0 <0.2.7-0 || >=0.2.7-0 <0.2.8-0 || >=0.2.8-0 <0.2.9-0 || >=0.2.9-0 <0.2.10-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/schemastery": { "optional": true },

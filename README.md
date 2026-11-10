@@ -5,7 +5,7 @@ DeepSeek Harness（DSH）插件：把 HTML 原型、报告、作品集等交付�
 - 作者：[passenfall](https://github.com/passenfall)
 - 许可：MIT
 - 适用：DSH 0.2.x
-- 版本：0.2.0（[更新日志](CHANGELOG.md)）
+- 版本：0.2.1（[更新日志](CHANGELOG.md)）
 
 | 就地批注 | 分类 QA | 可停靠面板 |
 |---|---|---|

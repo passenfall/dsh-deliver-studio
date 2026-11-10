@@ -2,6 +2,15 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-11-10
+
+### 变更
+- `peerDependencies` 由 `*` 改为显式范围：node-semver 的 `*` 不匹配预发布版本，而 `@deepseek-ai/dsh-tools` 目前只有预发布版本，`*` 与实际支持的版本对不上。新范围放行 DSH 0.2.x 各补丁版本的正式版与预发布版，不含 0.3。两个依赖都是可选 peer，实测 npm 安装新旧版本均不报错，此改动只让声明与实际支持范围一致。
+
+### 新增
+- `screenshots.json`（插件市场详情页截图）与 PNG 图标 `docs/icon-256.png`。
+- 打包脚本额外输出不带版本号的 `dsh-deliver-studio.tgz`，Release 里始终有同名资产，`releases/latest/download/dsh-deliver-studio.tgz` 总指向最新版。
+
 ## [0.2.0] - 2026-11-10
 
 ### 新增
@@ -34,5 +43,6 @@
 - 用本机 Chromium 内核浏览器（Edge / Chrome / Chromium / Brave）导出 A4 PDF，默认先跑 QA。
 - 模型工具 `deliver_qa`、`deliver_export_pdf` 与命令 `/deliver`。
 
+[0.2.1]: https://github.com/passenfall/dsh-deliver-studio/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/passenfall/dsh-deliver-studio/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/passenfall/dsh-deliver-studio/releases/tag/v0.1.0
